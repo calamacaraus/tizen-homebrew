@@ -1,36 +1,14 @@
 'use strict';
 
-const { inflateRawSync } = require('zlib');
-
 // Read without unzipping and without an XML parser: xml2js cost 99KB to extract two attributes.
-const readFromZip = (archive, wanted) => {
-    const LOCAL_HEADER = 0x04034b50;
+// The zip side lives in zip.js, which reads both ways a package can be written.
 
-    let cursor = 0;
+const zip = require('./zip.js');
 
-    while (cursor + 30 <= archive.length) {
-        if (archive.readUInt32LE(cursor) !== LOCAL_HEADER) break;
+// A Buffer is the ordinary case; a zip.js source is how a file on a stick is read without loading it.
+const sourceOf = (archive) => (Buffer.isBuffer(archive) ? zip.fromBuffer(archive) : archive);
 
-        const compression = archive.readUInt16LE(cursor + 8);
-        const compressedSize = archive.readUInt32LE(cursor + 18);
-        const nameLength = archive.readUInt16LE(cursor + 26);
-        const extraLength = archive.readUInt16LE(cursor + 28);
-
-        const nameAt = cursor + 30;
-        const name = archive.slice(nameAt, nameAt + nameLength).toString('utf8');
-        const dataAt = nameAt + nameLength + extraLength;
-
-        if (name === wanted) {
-            const data = archive.slice(dataAt, dataAt + compressedSize);
-            // 0 is stored, 8 is deflate; a .wgt uses no other method.
-            return compression === 0 ? data : inflateRawSync(data);
-        }
-
-        cursor = dataAt + compressedSize;
-    }
-
-    return null;
-};
+const readFromZip = (archive, wanted) => zip.read(sourceOf(archive), wanted);
 
 const identify = (archive) => {
     const attribute = (xml, tag, key) => {
