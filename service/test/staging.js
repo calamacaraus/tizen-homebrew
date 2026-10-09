@@ -285,6 +285,22 @@ const main = async () => {
     }
 
     {
+        // A package for a newer Tizen than the TV, refused before anything is signed.
+        const tube = fixture.zip('config.xml', Buffer.from('<?xml version="1.0"?><widget xmlns:tizen="http://tizen.org/ns/widgets" ' +
+            'version="1.4.0"><tizen:application id="tUb3Xq7Lm9.Tube" package="tUb3Xq7Lm9" required_version="5.5"/><name>YouTube</name></widget>'));
+        let signed = false;
+        const old = createInstaller({ sdb: fakeSdb(), config: fakeConfig(), store: createStore({ installing: false, catalog: [] }),
+            device: { probe: () => Promise.resolve({ onTv: true, ready: true, platformVersion: '3.0' }) },
+            resigner: () => { signed = true; return fakeResigner(); } });
+
+        const refused = await old.install({ source: 'upload', reference: 'tube.wgt', upload: tube }).catch((error) => error);
+
+        check('an app that needs a newer Tizen than the TV is refused, saying which, and never signed',
+            refused.code === 'needsNewerTizen' && /Tizen 5\.5/.test(refused.message) && /Tizen 3\.0/.test(refused.message) && !signed,
+            refused.message);
+    }
+
+    {
         const protocol = require('../src/protocol.js');
         const codeOf = (raw) => { try { protocol.parse(raw); return 'ok'; } catch (e) { return e.code; } };
 

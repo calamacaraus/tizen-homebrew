@@ -36,6 +36,7 @@ const usable = (entry) => {
         name: entry.name,
         description: typeof entry.description === 'string' ? entry.description.slice(0, 300) : '',
         version: typeof entry.version === 'string' ? entry.version : null,
+        forTizen: require('./compat.js').fromName(entry.tizen, entry.name, entry.source && entry.source.asset),
         packageId: typeof entry.packageId === 'string' ? entry.packageId : null,
         sha256: typeof entry.sha256 === 'string' && /^(sha256:)?[0-9a-f]{64}$/i.test(entry.sha256)
             ? entry.sha256.toLowerCase().replace(/^sha256:/, '')
@@ -68,7 +69,7 @@ const createCatalog = ({ url, cachePath, log }) => {
 
         if (!refresh && cached && cached.age < CACHE_TTL) {
             say.info(`${cached.entries.length} apps from the cache, ${took(cached.age)} old`);
-            return { entries: cached.entries, stale: false, source: 'cache' };
+            return { entries: cached.entries, stale: false, source: 'cache', fetchedAt: Date.now() - cached.age };
         }
 
         const began = Date.now();
@@ -93,11 +94,11 @@ const createCatalog = ({ url, cachePath, log }) => {
                 ? `, ${listed.length - entries.length} of ${listed.length} rejected as malformed` : ''} ` +
                 `in ${took(Date.now() - began)}`);
 
-            return { entries, stale: false, source: 'network' };
+            return { entries, stale: false, source: 'network', fetchedAt: Date.now() };
         } catch (error) {
             if (cached) {
                 say.warn(`origin unreachable (${error.message}) — showing ${cached.entries.length} cached apps instead`);
-                return { entries: cached.entries, stale: true, source: 'cache', error: error.message };
+                return { entries: cached.entries, stale: true, source: 'cache', error: error.message, fetchedAt: Date.now() - cached.age };
             }
 
             say.err(`no catalog and no cache: ${error.message}`);

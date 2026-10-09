@@ -227,9 +227,13 @@ const createUpdates = ({ packages, log, config, appIcons = null, latestRelease =
     const COOLDOWN = 60 * 1000;
     const justAsked = (repo) => remembered[repo] && Date.now() - remembered[repo].at < COOLDOWN;
 
-    const check = async (entries, { id = null } = {}) => {
+    // `id`: one app asked again; `repository`: every app of one list asked again (the built-in list's check,
+    // which for a collection is one request for its release instead); neither: everything stale.
+    const check = async (entries, { id = null, repository = null } = {}) => {
         const wanted = entries.filter((entry) => askable(entry) &&
-            (id ? entry.id === id && !justAsked(entry.source.ref) : !fresh(entry.source.ref)));
+            (id ? entry.id === id && !justAsked(entry.source.ref)
+                : repository ? (entry.repository || 'official') === repository && !justAsked(entry.source.ref)
+                    : !fresh(entry.source.ref)));
 
         if (!wanted.length) return mark(entries);
 

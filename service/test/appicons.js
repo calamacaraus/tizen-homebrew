@@ -109,6 +109,22 @@ const main = async () => {
             cached.entries[0].version !== '1.0.47' && asked.entries[0].version === '1.0.47',
             `${cached.entries[0].version} ${asked.entries[0].version}`);
 
+        // The collection keeps its app and gains another.
+        current = { tag_name: 'v3', assets: release.assets.concat([{ name: 'Doom.wgt', browser_download_url: 'https://x/Doom.wgt', digest: null }]) };
+        Date.now = () => realNow() + 2 * 61 * 1000;
+        const third = await library.fetch({ refresh: { repository: added.id } });
+        Date.now = realNow;
+
+        const doom = third.entries.find((entry) => entry.source.asset === 'Doom.wgt');
+        const kept = third.entries.find((entry) => entry.source.asset === 'Alpha-Player.wgt');
+        const row = third.repositories.find((repository) => repository.id === added.id);
+
+        check('an app that turns up in a collection after it was added is marked new, and counted',
+            doom && doom.isNew === true && row.newCount >= 1 && row.checkedAt, JSON.stringify({ doom: doom && doom.isNew, row }));
+
+        check('while one there since the collection was added is not', kept && !kept.isNew,
+            JSON.stringify(kept && { isNew: kept.isNew }));
+
         check('but pressed again within a minute, the answer just fetched stands',
             pressedAtOnce.entries[0].version !== '1.0.47', String(pressedAtOnce.entries[0].version));
 

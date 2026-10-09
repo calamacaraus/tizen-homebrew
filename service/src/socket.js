@@ -268,9 +268,26 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
             });
         };
 
-        const sendRepositories = async () => {
-            const result = await library.fetch({});
+        // `check`: one repository asked again now — its newest release, or its catalog — rather than all.
+        const sendRepositories = async ({ check } = {}) => {
+            const result = await library.fetch(check ? { refresh: { repository: check } } : {});
             send(Outbound.REPOSITORIES, { repositories: result.repositories });
+
+            // A list of apps each with its own release — the built-in one, or a catalog — is checked by asking
+            // each of those apps; a collection's own release was just read, which answered for all of them.
+            const listed = check && (result.repositories || []).find((repository) => repository.id === check);
+            if (listed && listed.kind === 'catalog') {
+                store.update({ catalog: result.entries, catalogStale: result.stale });
+                send(Outbound.CATALOG, {
+                    entries: await updates.check(result.entries, { repository: check }),
+                    others: await updates.others(result.entries),
+                    stale: result.stale,
+                    source: result.source,
+                    repositories: result.repositories || []
+                });
+                return;
+            }
+
             await sendCatalog(result);
         };
 
