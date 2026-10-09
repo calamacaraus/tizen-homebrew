@@ -152,14 +152,68 @@ const recheck = (app, checking) => (app.source.type !== 'github' || app.collecti
   <button class="btn btn-quiet" data-focus="check:${app.id}" data-on-click="check:${app.id}"
           ${checking ? 'disabled' : ''}>${checking === app.id ? 'checking…' : 'check'}</button>`);
 
-const row = (app, checking) => html`
-  <div class="row split">
-    ${identity(app, catalogued(app))}
-    <span class="controls">
-      ${recheck(app, checking)}
-      ${action(app)}
-    </span>
-  </div>`;
+// Your own name and icon, where you set them, are what the row shows: they are what the TV shows.
+const dressed = (app, customizations) => {
+    const custom = app.packageId && customizations ? customizations[app.packageId] : null;
+    if (!custom) return app;
+
+    return { ...app, name: custom.name || app.name, icon: custom.icon || app.icon };
+};
+
+const edit = (app) => (app.installed && app.packageId ? html`
+  <button class="btn btn-quiet btn-icon" data-focus="customize:${app.packageId}"
+          data-on-click="customize:${app.packageId}" title="Your own name and icon"
+          aria-label="Edit name and icon">✎</button>` : '');
+
+const row = (app, checking, customizations) => {
+    const shown = dressed(app, customizations);
+
+    return html`
+      <div class="row split">
+        ${identity(shown, catalogued(app))}
+        <span class="controls">
+          ${edit(app)}
+          ${recheck(app, checking)}
+          ${action(app)}
+        </span>
+      </div>`;
+};
+
+const customizer = (state) => {
+    const packageId = state.customizing;
+    if (!packageId) return html``;
+
+    const app = state.catalog.find((entry) => entry.packageId === packageId) || { packageId, name: packageId };
+    const custom = state.customizations[packageId] || {};
+    const icon = state.customIcon || custom.icon || app.icon;
+
+    return section(`Customise ${app.name}`, html`
+        <p class="small">Your own name and icon for this app on the TV’s home row. Kept for every update of it,
+          from wherever it is installed.</p>
+
+        <div class="row">
+          ${identity({ ...app, name: state.customDraft.name || custom.name || app.name, icon }, html`
+            <span class="mono micro truncate">${state.customIcon ? 'new icon chosen' : custom.icon ? 'your icon' : 'the app’s own icon'}</span>`, true)}
+        </div>
+
+        <input class="field" id="cname" placeholder="${app.name}" value="${state.customDraft.name}"
+               data-focus="cname" data-on-input="cname" maxlength="60" autocapitalize="words" spellcheck="false">
+
+        <label for="cicon" class="drop">
+          <span class="mono small">choose an icon</span>
+          <span class="micro mono">PNG or JPEG · fitted to 512×512</span>
+        </label>
+        <input id="cicon" type="file" accept="image/png,image/jpeg" hidden data-on-change="customIcon">`,
+    html`<span class="controls">
+        <button class="btn btn-signal" data-focus="custom:apply" data-on-click="custom:apply"
+                ${state.customBusy ? 'disabled' : ''}>save &amp; reinstall</button>
+        <button class="btn btn-ghost" data-focus="custom:save" data-on-click="custom:save"
+                ${state.customBusy ? 'disabled' : ''}>save</button>
+        ${state.customizations[packageId] ? html`<button class="btn btn-quiet" data-focus="custom:reset"
+                data-on-click="custom:reset">reset</button>` : ''}
+        <button class="btn btn-quiet" data-focus="custom:close" data-on-click="custom:close">close</button>
+      </span>`);
+};
 
 // Grouped by where each app is listed, in the order the repositories were added.
 const grouped = (state) => {
@@ -229,10 +283,10 @@ const catalog = (state) => {
         : html`${grouped(state).map((group) => html`
             <div class="stack stack-tight">
               ${grouped(state).length > 1 ? html`<span class="micro mono">${group.repository.name}</span>` : ''}
-              <div class="list">${group.apps.map((app) => row(app, state.checking))}</div>
+              <div class="list">${group.apps.map((app) => row(app, state.checking, state.customizations))}</div>
             </div>`)}`;
 
-    return html`${run(state)}${section('Available', body,
+    return html`${customizer(state)}${run(state)}${section('Available', body,
     html`<span class="controls">
       <button class="btn btn-ghost" data-focus="refresh" data-on-click="catalog:refresh">refresh</button>
       <button class="btn btn-ghost" data-focus="check-all" data-on-click="checkAll"

@@ -7,6 +7,7 @@ const { createHash } = require('crypto');
 const sources = require('./sources.js');
 const manifest = require('./manifest.js');
 const zip = require('./zip.js');
+const customize = require('./customize.js');
 
 // Re-signing unpacks every file into memory, so an archive that says it expands past this is refused before
 // it is opened — a zip bomb would otherwise end the service partway through an install.
@@ -113,6 +114,29 @@ const createInstaller = ({ sdb, device, config, resigner, store, log }) => {
                 `(${identity.packageId}${identity.appId ? `, app ${identity.appId}` : ''}, ${identity.isWgt ? 'wgt' : 'tpk'})`);
 
             return { ...carried, identity, described: preview.describe(carried.archive, identity) };
+        };
+
+        // Your own name and icon for this package, if you set them: changed before signing, so they are signed.
+        const applyCustomization = async (carried) => {
+            const stored = (config.read().customizations || {})[carried.identity.packageId];
+            if (!stored) return carried;
+
+            const bytes = stored.icon ? customize.iconBytes(config.CONFIG_DIR, stored.icon) : null;
+            const custom = { name: stored.name, icon: bytes ? { type: stored.icon.type, bytes } : null };
+
+            const { archive, changed, iconFile } = await customize.apply(carried.archive, carried.identity, custom);
+            if (!changed) return carried;
+
+            say.info(`applied your ${[custom.name ? `name "${custom.name}"` : null, iconFile ? 'icon' : null]
+                .filter(Boolean).join(' and ')} to ${carried.identity.packageId}`);
+
+            const identity = {
+                ...carried.identity,
+                name: custom.name || carried.identity.name,
+                iconPath: iconFile || carried.identity.iconPath
+            };
+
+            return { ...carried, archive, identity, described: preview.describe(archive, identity) };
         };
 
         // Always re-signed with this TV's own pair: from Tizen 7 the set checks the certificate is its own.
@@ -224,7 +248,7 @@ const createInstaller = ({ sdb, device, config, resigner, store, log }) => {
         try {
             const readied = await probeReadiness();
             const acquired = await acquirePackage(readied);
-            const identified = readIdentity(acquired);
+            const identified = await applyCustomization(readIdentity(acquired));
             const signed = await resign(identified);
             const staged = stageOnDisk(signed);
             const installed = await runInstaller(staged);

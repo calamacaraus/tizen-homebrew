@@ -28,6 +28,7 @@ const WebSocket = require('ws');
 const preview = require('./install/preview.js');
 const { allowedHost } = require('./http/hosts.js');
 const sources = require('./install/sources.js');
+const customize = require('./install/customize.js');
 const { took, host } = require('./obs/units.js');
 
 const CLOSED_BECAUSE = {
@@ -84,7 +85,8 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
     // could hold the television's memory hostage before parse() ever saw it.
     const wsServer = new WebSocket.Server({
         server,
-        maxPayload: 256 * 1024,
+        // Room for one custom icon (384KB, as base64) and nothing much more.
+        maxPayload: 640 * 1024,
         verifyClient: (info) => {
             const allowed = allowedOrigin(info);
             if (!allowed && auth) auth.warn(`refused a socket from the web page at ${info.origin}`);
@@ -269,6 +271,102 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
 
         // Progress reaches every paired screen through autoUpdate's broadcast; this answers with the catalog
         // as it stands afterwards.
+        // Icons go out as data URIs, so the phone shows the tile it will get without asking again. All of them
+        // when a phone asks; only the one that changed when somebody changes one.
+        const describeCustomization = (custom) => {
+            const bytes = custom.icon ? customize.iconBytes(config.CONFIG_DIR, custom.icon) : null;
+
+            return {
+                name: custom.name || null,
+                icon: bytes ? `data:${custom.icon.type};base64,${bytes.toString('base64')}` : null,
+                at: custom.at || null
+            };
+        };
+
+        const sendCustomizations = () => {
+            const kept = config.read().customizations || {};
+
+            send(Outbound.CUSTOMIZATIONS, {
+                items: Object.keys(kept).reduce((items, packageId) => {
+                    items[packageId] = describeCustomization(kept[packageId]);
+                    return items;
+                }, {})
+            });
+        };
+
+        // Where this package was installed from, so it can be installed again with the change in it.
+        const sourceOf = (packageId) =>
+            customize.sourceFor(store.select('catalog'), config.read().installedFrom, packageId);
+
+        const setCustomization = async (payload) => {
+            const { packageId, reset, apply } = payload;
+            const kept = { ...(config.read().customizations || {}) };
+            const previous = kept[packageId] || null;
+
+            if (reset) {
+                delete kept[packageId];
+            } else {
+                if (!previous && Object.keys(kept).length >= customize.MAX_CUSTOMIZED) {
+                    throw ProtocolError(ErrorCode.BAD_MESSAGE,
+                        `Up to ${customize.MAX_CUSTOMIZED} apps can be customised; reset one first.`);
+                }
+
+                // Left out means "as it was"; null means "back to the app's own".
+                const checked = customize.validate({
+                    packageId,
+                    name: 'name' in payload ? payload.name : previous && previous.name,
+                    icon: 'icon' in payload ? payload.icon : null
+                });
+
+                let icon = previous ? previous.icon || null : null;
+
+                if ('icon' in payload && checked.icon) {
+                    const others = Object.keys(kept)
+                        .filter((id) => id !== packageId)
+                        .reduce((total, id) => total + customize.storedSize(config.CONFIG_DIR, kept[id].icon), 0);
+
+                    if (others + Buffer.byteLength(checked.icon.data, 'base64') > customize.MAX_ICONS_TOTAL) {
+                        throw ProtocolError(ErrorCode.TOO_LARGE,
+                            'The custom icons together are at their limit; reset one, or use a simpler picture.');
+                    }
+
+                    // Written before anything is removed, so a failed write leaves the old icon where it was.
+                    icon = customize.storeIcon(config.CONFIG_DIR, packageId, checked.icon);
+                } else if ('icon' in payload) {
+                    icon = null;
+                }
+
+                if (!checked.name && !icon) delete kept[packageId];
+                else kept[packageId] = { name: checked.name, icon, at: new Date().toISOString() };
+            }
+
+            config.update({ customizations: kept });
+
+            // The old file goes only once the configuration no longer points at it.
+            const now = kept[packageId] && kept[packageId].icon;
+            if (previous && previous.icon && (!now || now.file !== previous.icon.file)) {
+                customize.dropIcon(config.CONFIG_DIR, previous.icon);
+            }
+            if (say) say.info(`${client} ${reset ? 'reset' : 'customised'} ${packageId}`);
+
+            broadcastPaired(Outbound.CUSTOMIZATIONS, {
+                items: { [packageId]: kept[packageId] ? describeCustomization(kept[packageId]) : null },
+                partial: true
+            });
+
+            if (!apply) return;
+
+            const from = sourceOf(packageId);
+
+            if (!from) {
+                throw ProtocolError(ErrorCode.SAVED_NOT_APPLIED,
+                    'No list Homebrew knows has this app, so it cannot fetch it again by itself. Install it once more from ' +
+                    'where it came from (upload, GitHub or URL) to see the change now; every update after that keeps it.');
+            }
+
+            await runInstall({ source: 'catalog', ref: from });
+        };
+
         // An install already running is waited for inside the run, so this is never refused for being busy.
         const updateAll = async ({ includeRebuilt }) => {
             if (say) say.info(`${client} asked to update everything${includeRebuilt ? ', rebuilds included' : ''}`);
@@ -406,6 +504,8 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
             [Inbound.REMOVE_REPOSITORY]: removeRepository,
             [Inbound.GET_SETTINGS]: sendSettings,
             [Inbound.SET_SETTINGS]: setSettings,
+            [Inbound.GET_CUSTOMIZATIONS]: sendCustomizations,
+            [Inbound.SET_CUSTOMIZATION]: setCustomization,
             [Inbound.LIST_DIR]: listDirectory,
             [Inbound.SET_RELAY]: setRelay,
             [Inbound.RELAY_EXEC]: runRelayCommand,

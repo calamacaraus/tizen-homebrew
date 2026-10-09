@@ -90,6 +90,42 @@ const run = async () => {
     }
 
     {
+        // What the resigner is handed is what gets signed and installed: it has to be the customised copy.
+        let signed = null;
+        const capture = () => Promise.resolve(async (archive) => {
+            signed = archive;
+            return { archive, device: 'TESTSET', files: 1 };
+        });
+
+        const announced = [];
+        const store = createStore({ installing: false, catalog: [] });
+
+        const { install } = createInstaller({
+            sdb: fakeSdb(),
+            device: fakeDevice(),
+            config: fakeConfig({
+                author: 'present',
+                customizations: { GJBBYNLkgP: { name: 'My Homebrew', icon: { type: 'image/png', data: fixture.PIXEL.toString('base64') } } }
+            }),
+            resigner: capture,
+            store
+        });
+
+        const outcome = await install({ source: 'upload', reference: 'homebrew.wgt', upload: fixture.wgtWithIcon() },
+            (phase, _detail, extra) => { if (extra && extra.identity) announced.push(extra.identity); });
+
+        const signedIdentity = signed && require('../src/install/manifest.js').identify(signed);
+
+        check('a customised app is signed with its new name and icon in it',
+            signedIdentity && signedIdentity.name === 'My Homebrew' && signedIdentity.iconPath === 'homebrew-icon.png',
+            JSON.stringify(signedIdentity));
+
+        check('and the phone is shown the name it will have',
+            outcome.name === 'My Homebrew' && announced[0] && announced[0].name === 'My Homebrew',
+            JSON.stringify([outcome.name, announced[0] && announced[0].name]));
+    }
+
+    {
         const store = createStore({ installing: true, catalog: [] });
         const { install } = createInstaller({
             sdb: fakeSdb(), device: fakeDevice(), config: fakeConfig(),
