@@ -2,12 +2,32 @@
 
 // HTTP answers single questions; the socket handles everything that unfolds. `protocol.js` fixes the shapes.
 
-const { readdirSync, statSync } = require('fs');
-const { join } = require('path');
+const { readdirSync, statSync, realpathSync } = require('fs');
+const { join, normalize } = require('path');
+
+// Where removable storage is mounted on a television. Browsing is for finding a package on a stick, so
+// the rest of the disk — the configuration with the signing keys in it, other apps' data — is not listed.
+// HOMEBREW_MEDIA_ROOTS (colon-separated) widens it, for a model that mounts elsewhere.
+const MEDIA_ROOTS = (process.env.HOMEBREW_MEDIA_ROOTS || '/media:/opt/media:/opt/usr/media:/mnt:/storage')
+    .split(':').filter(Boolean);
+
+const insideMedia = (path) => {
+    const resolved = (() => {
+        try {
+            return realpathSync(normalize(path));
+        } catch (e) {
+            return normalize(path);
+        }
+    })();
+
+    return MEDIA_ROOTS.some((root) => resolved === root || resolved.indexOf(`${root}/`) === 0);
+};
 
 const WebSocket = require('ws');
 
 const preview = require('./install/preview.js');
+const { allowedHost } = require('./http/hosts.js');
+const sources = require('./install/sources.js');
 const { took, host } = require('./obs/units.js');
 
 const CLOSED_BECAUSE = {
@@ -19,20 +39,68 @@ const CLOSED_BECAUSE = {
     1012: 'the service is restarting'
 };
 
-const attach = ({ server, store, authorise, installer, catalog, updates, relay, refreshDevice,
-    fromLoopback, greeting, recorded, config, protocol, log }) => {
+const attach = ({ server, store, authorise, installer, library, updates, autoUpdate, relay, refreshDevice,
+    fromLoopback, greeting, recorded, config, protocol, log, latestRelease = sources.latestRelease }) => {
     const { Inbound, Outbound, ErrorCode, ProtocolError } = protocol;
 
     const say = log ? log.on('sock') : null;
     const auth = log ? log.on('auth') : null;
 
-    const wsServer = new WebSocket.Server({ server });
+    // A browser sends the page's origin with every WebSocket handshake, and any web page the phone has open
+    // could otherwise reach this socket and spend the five PIN attempts — or, holding a PIN somehow, act
+    // with it. Let in: clients that are not browsers (no Origin: the CLI tools); this service's own page;
+    // a development server on localhost; and, from the television itself, its own packaged page, whose
+    // origin is file:// or app:// rather than a web address. A web site is refused wherever it is open —
+    // including the TV's own browser, which would otherwise be handed the code in the loopback greeting.
+    const allowedOrigin = (info) => {
+        const headers = (info.req && info.req.headers) || {};
+        if (!allowedHost(headers.host)) return false;
+
+        const origin = info.origin || headers.origin;
+        if (!origin) return true;
+
+        const address = (info.req && info.req.socket && info.req.socket.remoteAddress) || '';
+        const loopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].indexOf(address) !== -1;
+
+        let parsed = null;
+
+        try {
+            parsed = new URL(origin);
+        } catch (e) {
+            parsed = null;
+        }
+
+        const web = parsed && (parsed.protocol === 'http:' || parsed.protocol === 'https:');
+
+        if (!web) return loopback;
+
+        const host = String(headers.host || '').toLowerCase();
+        const local = ['localhost', '127.0.0.1', '[::1]'].indexOf(parsed.hostname.toLowerCase()) !== -1;
+
+        return parsed.host.toLowerCase() === host || local;
+    };
+
+    // Every message is a small JSON frame; uploads go over HTTP. Left at ws's 100MB default, one frame
+    // could hold the television's memory hostage before parse() ever saw it.
+    const wsServer = new WebSocket.Server({
+        server,
+        maxPayload: 256 * 1024,
+        verifyClient: (info) => {
+            const allowed = allowedOrigin(info);
+            if (!allowed && auth) auth.warn(`refused a socket from the web page at ${info.origin}`);
+            return allowed;
+        }
+    });
 
     let connected = 0;
 
     // Everyone the service pushes to unasked. A phone gets what it asks for; the television's own
     // page asks once and is then told, which is what replaced its second-by-second polling.
     const watchers = [];
+
+    // Every paired connection, phone or television, for what all of them should hear at once: an update
+    // run's progress, and a setting someone changed.
+    const paired_ = [];
 
     wsServer.on('connection', (socket, request) => {
         let paired = false;
@@ -52,6 +120,9 @@ const attach = ({ server, store, authorise, installer, catalog, updates, relay, 
 
             const watching = watchers.indexOf(push);
             if (watching !== -1) watchers.splice(watching, 1);
+
+            const listening = paired_.indexOf(push);
+            if (listening !== -1) paired_.splice(listening, 1);
 
             if (!say) return;
 
@@ -118,6 +189,7 @@ const attach = ({ server, store, authorise, installer, catalog, updates, relay, 
             }
 
             paired = true;
+            if (paired_.indexOf(push) === -1) paired_.push(push);
             if (auth) auth.ok(`${client} paired`);
             send(Outbound.HELLO, { ok: true, needsPin: false });
             send(Outbound.RELAY_STATE, { enabled: relay.enabled });
@@ -125,33 +197,98 @@ const attach = ({ server, store, authorise, installer, catalog, updates, relay, 
             await sendDeviceState();
         };
 
-        const listCatalog = async ({ refresh }) => {
-            const result = await catalog.fetch({ refresh: !!refresh });
-
+        const sendCatalog = async (result) => {
             store.update({ catalog: result.entries, catalogStale: result.stale });
 
             // Marked from the kept listing rather than by asking the set, so the list draws now.
-            send(Outbound.CATALOG, { ...result, entries: await updates.mark(result.entries) });
+            send(Outbound.CATALOG, {
+                entries: await updates.mark(result.entries),
+                stale: result.stale,
+                source: result.source,
+                repositories: result.repositories || []
+            });
         };
 
+        const listCatalog = async ({ refresh }) => sendCatalog(await library.fetch({ refresh: !!refresh }));
+
+        // One app asks GitHub about that app; everything also asks each collection what its newest
+        // release holds now, so a rebuilt file in one is seen without a full refresh.
         const checkUpdates = async ({ id }) => {
+            const result = id ? null : await library.fetch({ refresh: 'collections' });
+            if (result) store.update({ catalog: result.entries, catalogStale: result.stale });
+
             const entries = store.select('catalog') || [];
 
             send(Outbound.CATALOG, {
                 entries: await updates.check(entries, { id: id || null }),
                 stale: Boolean(store.select('catalogStale')),
-                source: 'cache'
+                source: 'cache',
+                repositories: result ? result.repositories : undefined
             });
+        };
+
+        const listRelease = async ({ ref }) => {
+            const release = await latestRelease(ref);
+
+            send(Outbound.RELEASE, {
+                repo: sources.repoOf(ref),
+                tag: release.tag_name || null,
+                name: release.name || null,
+                publishedAt: release.published_at || null,
+                assets: sources.packagesIn(release)
+            });
+        };
+
+        const sendRepositories = async () => {
+            const result = await library.fetch({});
+            send(Outbound.REPOSITORIES, { repositories: result.repositories });
+            await sendCatalog(result);
+        };
+
+        const addRepository = async ({ ref }) => {
+            if (say) say.info(`${client} adds the repository ${ref}`);
+            await library.add(ref);
+            await sendRepositories();
+        };
+
+        const removeRepository = async ({ id }) => {
+            library.remove(id);
+            await sendRepositories();
+        };
+
+        const sendSettings = () => send(Outbound.SETTINGS, autoUpdate.settings());
+
+        const setSettings = ({ autoUpdate: mode }) => {
+            if (mode) {
+                config.update({ autoUpdate: mode });
+                if (say) say.info(`${client} set automatic updates to ${mode}`);
+            }
+
+            broadcastPaired(Outbound.SETTINGS, autoUpdate.settings());
+        };
+
+        // Progress reaches every paired screen through autoUpdate's broadcast; this answers with the catalog
+        // as it stands afterwards.
+        // An install already running is waited for inside the run, so this is never refused for being busy.
+        const updateAll = async ({ includeRebuilt }) => {
+            if (say) say.info(`${client} asked to update everything${includeRebuilt ? ', rebuilds included' : ''}`);
+
+            await autoUpdate.run({ trigger: 'asked', includeRebuilt: Boolean(includeRebuilt) });
+            await listCatalog({ refresh: false });
         };
 
         const describe = ({ source, ref }) => `${source} ${ref}`;
 
-        const runInstall = async ({ source, ref }) => {
-            if (say) say.info(`${client} asked to install ${describe({ source, ref })}`);
+        const runInstall = async ({ source, ref, asset }) => {
+            if (source === 'file' && !insideMedia(ref)) {
+                return sendFailure(ProtocolError(ErrorCode.NOT_FOUND, 'Only a package on removable storage can be installed from a file.'));
+            }
+
+            if (say) say.info(`${client} asked to install ${describe({ source, ref })}${asset ? ` (${asset})` : ''}`);
 
             try {
                 const outcome = await installer.install(
-                    { source, reference: ref },
+                    { source, reference: ref, asset: asset || null },
                     (phase, detail, extra) => send(Outbound.PROGRESS, {
                         phase,
                         detail: detail || null,
@@ -173,6 +310,10 @@ const attach = ({ server, store, authorise, installer, catalog, updates, relay, 
 
         const listDirectory = ({ path }) => {
             const root = path || '/media';
+
+            if (!insideMedia(root)) {
+                return sendFailure(ProtocolError(ErrorCode.NOT_FOUND, `Cannot read ${root}: only removable storage is browsable.`));
+            }
 
             const readable = (() => {
                 try {
@@ -205,7 +346,7 @@ const attach = ({ server, store, authorise, installer, catalog, updates, relay, 
                 } catch (e) {
                     return found; // Unreadable entries are simply not offered.
                 }
-            }, [{ name: '..', path: root === '/media' ? '/media' : join(root, '..'), isDirectory: true }]);
+            }, [{ name: '..', path: MEDIA_ROOTS.indexOf(root) !== -1 ? root : join(root, '..'), isDirectory: true }]);
 
             send(Outbound.DIR, entries);
         };
@@ -258,6 +399,13 @@ const attach = ({ server, store, authorise, installer, catalog, updates, relay, 
             [Inbound.GET_CATALOG]: listCatalog,
             [Inbound.CHECK_UPDATES]: checkUpdates,
             [Inbound.INSTALL]: runInstall,
+            [Inbound.UPDATE_ALL]: updateAll,
+            [Inbound.LIST_RELEASE]: listRelease,
+            [Inbound.GET_REPOSITORIES]: sendRepositories,
+            [Inbound.ADD_REPOSITORY]: addRepository,
+            [Inbound.REMOVE_REPOSITORY]: removeRepository,
+            [Inbound.GET_SETTINGS]: sendSettings,
+            [Inbound.SET_SETTINGS]: setSettings,
             [Inbound.LIST_DIR]: listDirectory,
             [Inbound.SET_RELAY]: setRelay,
             [Inbound.RELAY_EXEC]: runRelayCommand,
@@ -306,7 +454,11 @@ const attach = ({ server, store, authorise, installer, catalog, updates, relay, 
     // the only caller today.
     const broadcast = (type, payload) => watchers.slice().forEach((to) => to(type, payload));
 
-    return { wsServer, broadcast };
+    function broadcastPaired(type, payload) {
+        paired_.slice().forEach((to) => to(type, payload));
+    }
+
+    return { wsServer, broadcast, broadcastPaired };
 };
 
 module.exports = { attach };

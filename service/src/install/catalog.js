@@ -14,21 +14,32 @@ const logoFor = (source) => (source.type === 'github'
     ? `https://raw.githubusercontent.com/${source.ref}/HEAD/logo.png`
     : null);
 
+// An id ends up in markup attributes and in config keys, so it is held to a plain alphabet.
+const ID = /^[A-Za-z0-9._-]{1,64}$/;
+
 const usable = (entry) => {
     if (!entry || typeof entry.id !== 'string' || typeof entry.name !== 'string') return null;
+    if (!ID.test(entry.id) || entry.name.length > 120) return null;
     if (!entry.source || !['github', 'url'].includes(entry.source.type)) return null;
     if (typeof entry.source.ref !== 'string') return null;
 
     const source = { type: entry.source.type, ref: entry.source.ref };
 
     if (source.type === 'github' && typeof entry.source.asset === 'string') source.asset = entry.source.asset;
+    if (source.type === 'github' && entry.source.exact === true) source.exact = true;
+
+    // Only https is fetched, so a catalog that lists anything else lists something that cannot install.
+    if (source.type === 'url' && !/^https:\/\//.test(source.ref)) return null;
 
     return {
         id: entry.id,
         name: entry.name,
-        description: typeof entry.description === 'string' ? entry.description : '',
+        description: typeof entry.description === 'string' ? entry.description.slice(0, 300) : '',
         version: typeof entry.version === 'string' ? entry.version : null,
         packageId: typeof entry.packageId === 'string' ? entry.packageId : null,
+        sha256: typeof entry.sha256 === 'string' && /^(sha256:)?[0-9a-f]{64}$/i.test(entry.sha256)
+            ? entry.sha256.toLowerCase().replace(/^sha256:/, '')
+            : null,
         icon: typeof entry.icon === 'string' && entry.icon.startsWith('https://')
             ? entry.icon
             : logoFor(source),
@@ -65,7 +76,7 @@ const createCatalog = ({ url, cachePath, log }) => {
         try {
             say.info(`fetching ${url}`);
 
-            const body = await getJson(url, { headers: { 'user-agent': 'TizenHomebrew/1.0' } });
+            const body = await getJson(url, { headers: { 'user-agent': 'TizenHomebrew/1.0' }, httpsOnly: /^https:/.test(url) });
             const listed = Array.isArray(body) ? body : body && body.apps;
 
             if (!Array.isArray(listed)) throw new Error('Catalog was not a list of apps.');
@@ -97,4 +108,4 @@ const createCatalog = ({ url, cachePath, log }) => {
     return { fetch };
 };
 
-module.exports = { createCatalog, usable, logoFor };
+module.exports = { createCatalog, usable, logoFor, ID };

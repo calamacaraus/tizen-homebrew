@@ -93,6 +93,7 @@ const identity = (app, below = '', hero = false) => html`
 
 const TABS = [
     ['catalog', 'apps'],
+    ['repos', 'repos'],
     ['upload', 'upload'],
     ['github', 'github'],
     ['url', 'url'],
@@ -120,43 +121,194 @@ const catalogued = (app) => {
     const held = html`<span class="mono">${app.installed}</span>`;
 
     if (app.update) {
-        return html`<span class="small truncate">${held} → <span class="mono ink">${app.available}</span></span>`;
+        return html`<span class="small truncate">${held} → <span class="mono ink">${app.available || 'new build'}</span></span>`;
     }
 
+    if (app.rebuilt) return html`<span class="small truncate">${held} installed · a new build of it is out</span>`;
+
     return html`<span class="small truncate">${held} installed${app.checked
-        ? (app.available ? ' · up to date' : ' · no release found')
+        ? (app.available || app.sha256 ? ' · up to date' : ' · no release found')
         : ''}</span>`;
 };
 
-const action = (app) => (app.installed
-    ? html`<button class="btn ${app.update ? 'btn-signal' : 'btn-ghost'}"
-                   data-focus="app:${app.id}" data-on-click="install:catalog:${app.id}"
-                   ${app.update ? '' : 'disabled'}>update</button>`
-    : html`<button class="btn btn-ghost" data-focus="app:${app.id}"
-                   data-on-click="install:catalog:${app.id}">install</button>`);
+const action = (app) => {
+    if (!app.installed) {
+        return html`<button class="btn btn-ghost" data-focus="app:${app.id}"
+                       data-on-click="install:catalog:${app.id}">install</button>`;
+    }
 
-const recheck = (app, checking) => (app.source.type !== 'github' ? '' : html`
+    if (app.rebuilt) {
+        return html`<button class="btn btn-ghost" data-focus="app:${app.id}"
+                       data-on-click="install:catalog:${app.id}">reinstall</button>`;
+    }
+
+    return html`<button class="btn ${app.update ? 'btn-signal' : 'btn-ghost'}"
+                   data-focus="app:${app.id}" data-on-click="install:catalog:${app.id}"
+                   ${app.update ? '' : 'disabled'}>update</button>`;
+};
+
+// A collection's entries are checked by asking for the collection, which "check all" does.
+const recheck = (app, checking) => (app.source.type !== 'github' || app.collection ? '' : html`
   <button class="btn btn-quiet" data-focus="check:${app.id}" data-on-click="check:${app.id}"
           ${checking ? 'disabled' : ''}>${checking === app.id ? 'checking…' : 'check'}</button>`);
 
-const catalog = (state) => section('Available', state.catalog.length === 0
-    ? html`<p class="small">Nothing listed yet. Use upload, github or url.</p>`
-    : html`<div class="list">
-        ${state.catalog.map((app) => html`
-          <div class="row split">
-            ${identity(app, catalogued(app))}
-            <span class="controls">
-              ${recheck(app, state.checking)}
-              ${action(app)}
-            </span>
-          </div>`)}
-      </div>`,
+const row = (app, checking) => html`
+  <div class="row split">
+    ${identity(app, catalogued(app))}
+    <span class="controls">
+      ${recheck(app, checking)}
+      ${action(app)}
+    </span>
+  </div>`;
+
+// Grouped by where each app is listed, in the order the repositories were added.
+const grouped = (state) => {
+    const known = state.repositories.length
+        ? state.repositories
+        : [{ id: 'official', name: 'Tizen Homebrew' }];
+
+    const groups = known
+        .map((repository) => ({ repository, apps: state.catalog.filter((app) => (app.repository || 'official') === repository.id) }))
+        .filter((group) => group.apps.length);
+
+    // Anything from a repository that is no longer listed still shows, rather than vanishing.
+    const placed = groups.reduce((count, group) => count + group.apps.length, 0);
+    if (placed < state.catalog.length) {
+        const ids = known.map((repository) => repository.id);
+        groups.push({ repository: { id: 'other', name: 'Other' }, apps: state.catalog.filter((app) => ids.indexOf(app.repository || 'official') === -1) });
+    }
+
+    return groups;
+};
+
+const run = (state) => {
+    const progress = state.updateRun;
+    if (!progress) return html``;
+
+    if (progress.running) {
+        const done = progress.total ? Math.round((progress.index / progress.total) * 100) : 0;
+
+        return html`
+          <div class="state state-warn">
+            <span class="state-head">Updating${progress.total ? ` ${progress.index + 1} of ${progress.total}` : ''}</span>
+            <span class="small truncate">${progress.current || 'Looking for updates…'}</span>
+            <div class="meter"><i style="width:${done}%"></i></div>
+          </div>`;
+    }
+
+    if (progress.error) {
+        return html`<div class="state state-fault"><span class="state-head">Could not update</span>
+          <span class="small wrap">${progress.error}</span></div>`;
+    }
+
+    const failed = progress.failed || [];
+    const updated = progress.updated || [];
+
+    if (!updated.length && !failed.length) {
+        return html`<div class="state state-ok"><span class="state-head">Up to date</span>
+          <span class="small">${progress.available && progress.available.length
+              ? `Newer: ${progress.available.join(', ')}`
+              : 'Nothing has a newer release.'}</span></div>`;
+    }
+
+    return html`
+      <div class="state ${failed.length ? 'state-fault' : 'state-ok'}">
+        <span class="state-head">${updated.length ? `Updated ${updated.length}` : 'Nothing updated'}</span>
+        ${updated.length ? html`<span class="small wrap">${updated.join(', ')}</span>` : ''}
+        ${failed.map((failure) => html`<span class="small wrap"><span class="ink">${failure.name}</span> · ${failure.message}</span>`)}
+      </div>`;
+};
+
+const catalog = (state) => {
+    const pending = state.catalog.filter((app) => app.update).length;
+    const rebuilt = state.catalog.filter((app) => app.rebuilt).length;
+    const busy = Boolean(state.updateRun && state.updateRun.running);
+
+    const body = state.catalog.length === 0
+        ? html`<p class="small">Nothing listed yet. Add a repository under repos, or use upload, github or url.</p>`
+        : html`${grouped(state).map((group) => html`
+            <div class="stack stack-tight">
+              ${grouped(state).length > 1 ? html`<span class="micro mono">${group.repository.name}</span>` : ''}
+              <div class="list">${group.apps.map((app) => row(app, state.checking))}</div>
+            </div>`)}`;
+
+    return html`${run(state)}${section('Available', body,
     html`<span class="controls">
       <button class="btn btn-ghost" data-focus="refresh" data-on-click="catalog:refresh">refresh</button>
       <button class="btn btn-ghost" data-focus="check-all" data-on-click="checkAll"
-              ${state.checking ? 'disabled' : ''}>${state.checking === 'all'
+              ${state.checking || busy ? 'disabled' : ''}>${state.checking === 'all'
         ? 'checking…' : 'check all'}</button>
-    </span>`);
+      ${pending ? html`<button class="btn btn-signal" data-focus="update-all" data-on-click="updateAll"
+              ${busy ? 'disabled' : ''}>update all · ${pending}</button>` : ''}
+      ${rebuilt && !pending ? html`<button class="btn btn-ghost" data-focus="update-rebuilt" data-on-click="updateAll:rebuilt"
+              ${busy ? 'disabled' : ''}>reinstall rebuilt · ${rebuilt}</button>` : ''}
+    </span>`)}`;
+};
+
+const MODES = [
+    ['off', 'off', 'Only when you press update.'],
+    ['check', 'check daily', 'Looks once a day and lists what is newer, here and on the TV.'],
+    ['install', 'install daily', 'Looks once a day and installs what is newer, with nobody at the phone.']
+];
+
+const when = (iso) => {
+    if (!iso) return 'never';
+    const minutes = Math.round((Date.now() - Date.parse(iso)) / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes} min ago`;
+    if (minutes < 48 * 60) return `${Math.round(minutes / 60)} h ago`;
+    return `${Math.round(minutes / 1440)} days ago`;
+};
+
+const repoRow = (repository) => html`
+  <div class="row split">
+    <span class="stack stack-tight">
+      <span class="inline">
+        <span class="name truncate">${repository.name}</span>
+        <span class="mono micro">${repository.builtIn ? 'built in' : repository.kind === 'github' ? 'collection' : 'catalog'}</span>
+      </span>
+      <span class="small truncate">${repository.count === null || repository.count === undefined
+          ? 'not loaded yet'
+          : `${repository.count} ${repository.count === 1 ? 'app' : 'apps'}`}${repository.error
+          ? html` · <span class="ink">${repository.stale && repository.count ? 'offline, showing the last list' : repository.error}</span>`
+          : ''}</span>
+    </span>
+    <span class="controls">
+      ${repository.builtIn ? '' : html`<button class="btn btn-quiet" data-focus="unrepo:${repository.id}"
+          data-on-click="unrepo:${repository.id}">remove</button>`}
+    </span>
+  </div>`;
+
+const repos = (state) => {
+    const mode = state.settings ? state.settings.autoUpdate : null;
+    const last = state.settings && state.settings.lastResult;
+
+    return html`
+      ${section('Repositories', html`
+        <p class="small">Add a GitHub <span class="mono ink">owner/repo</span> whose newest release holds the apps — a
+          collection like <span class="mono ink">example/tv-packages</span> — or an https link to a
+          catalog.json. Its apps appear under apps.</p>
+        <div class="list">${state.repositories.map(repoRow)}</div>
+        <div class="entry">
+          <input class="field" id="repo" placeholder="owner/repo or https://…/catalog.json"
+                 data-focus="repo" data-on-enter="repo:add"
+                 autocapitalize="off" autocorrect="off" spellcheck="false">
+          <button class="btn" data-focus="repo:go" data-on-click="repo:add"
+                  ${state.repoBusy ? 'disabled' : ''}>${state.repoBusy ? 'adding…' : 'add'}</button>
+        </div>`)}
+      ${section('Automatic updates', html`
+        <div class="list">
+          ${MODES.map(([value, label, hint]) => html`
+            <label class="toggle">
+              <input type="radio" name="auto" data-focus="auto:${value}" data-on-change="auto:${value}"
+                     ${mode === value ? 'checked' : ''}>
+              <span class="stack stack-tight"><span class="small ink">${label}</span><span class="micro">${hint}</span></span>
+            </label>`)}
+        </div>
+        <span class="micro mono">last looked ${when(state.settings && state.settings.lastCheck)}${last && last.updated && last.updated.length
+            ? ` · updated ${last.updated.join(', ')}` : ''}${last && last.available && last.available.length
+            ? ` · newer: ${last.available.join(', ')}` : ''}</span>`)}`;
+};
 
 // The archive is on the phone already, so it is opened and the well shows the app rather than the filename.
 const chosen = (state) => {
@@ -199,10 +351,51 @@ const remoteSource = ({ label, id, placeholder, action, hint, value }) => sectio
     </div>
     <p class="small">${hint}</p>`);
 
-const fromGitHub = (state) => remoteSource({
-    label: 'GitHub release', id: 'gh', placeholder: 'owner/repo', action: 'install:github',
-    hint: 'The newest release’s .wgt asset. Public repositories only.', value: state.github
-});
+const weightOf = (bytes) => (bytes ? weight(bytes) : '');
+
+const releaseFiles = (state) => {
+    if (state.releaseLoading) return html`<p class="small">Asking GitHub for the newest release…</p>`;
+
+    const release = state.release;
+    if (!release) return html``;
+
+    if (!release.assets.length) {
+        return html`<div class="state state-warn"><span class="state-head">No packages</span>
+          <span class="small">${release.repo} ${release.tag || ''} has no .wgt or .tpk files.</span></div>`;
+    }
+
+    return html`
+      <span class="micro mono">${release.repo} · ${release.tag || 'untagged'}${release.assets.length > 1
+          ? ` · ${release.assets.length} files` : ''}</span>
+      <div class="list">
+        ${release.assets.map((file) => html`
+          <div class="row split">
+            <span class="stack stack-tight">
+              <span class="name truncate">${file.name}</span>
+              <span class="mono micro truncate">${[weightOf(file.size), file.sha256 ? `sha256 ${file.sha256.slice(0, 12)}…` : 'no checksum published']
+                  .filter(Boolean).join(' · ')}</span>
+            </span>
+            <span class="controls">
+              <button class="btn btn-ghost" data-focus="asset:${file.name}" data-on-click="asset:${file.name}">install</button>
+            </span>
+          </div>`)}
+      </div>
+      ${release.assets.length > 1 ? html`
+        <button class="btn btn-ghost btn-wide" data-focus="collection:add" data-on-click="collection:add">
+          add ${release.repo} as a collection</button>` : ''}`;
+};
+
+const fromGitHub = (state) => section('GitHub release', html`
+    <div class="entry">
+      <input class="field" id="gh" placeholder="owner/repo" value="${state.github || ''}"
+             data-focus="gh" data-on-enter="install:github"
+             autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button class="btn" data-focus="gh:go" data-on-click="install:github"
+              ${state.releaseLoading ? 'disabled' : ''}>find</button>
+    </div>
+    <p class="small">Lists the files in the newest release, with their published sha256, to install one.
+      Public repositories only.</p>
+    ${releaseFiles(state)}`);
 
 const fromUrl = (state) => remoteSource({
     label: 'Direct URL', id: 'url', placeholder: 'https://…/App.wgt', action: 'install:url',
@@ -255,7 +448,7 @@ const relay = (state) => section('Command relay', html`
       </div>
       <pre class="log shell">${state.relayOutput || ' '}</pre>` : ''}`);
 
-const PANELS = { catalog, upload, github: fromGitHub, url: fromUrl, usb, relay };
+const PANELS = { catalog, repos, upload, github: fromGitHub, url: fromUrl, usb, relay };
 
 const panel = (state) => PANELS[state.tab](state);
 
@@ -309,7 +502,8 @@ const outcome = (state) => {
           <div class="state state-ok">
             <span class="state-head">Installed</span>
             ${identity(app, html`<span class="mono micro truncate">${app.packageId || ''}</span>`)}
-            <span class="small">On the TV’s home row.</span>
+            <span class="small">On the TV’s home row.${state.done && state.done.verified
+                ? ' The download matched its published sha256.' : ''}</span>
           </div>`;
     }
 

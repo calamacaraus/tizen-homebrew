@@ -9,7 +9,14 @@ const Inbound = {
     WATCH: 'watch',                 // { logsSince? } — push the log and the device state as they change
     GET_CATALOG: 'getCatalog',      // { refresh? }
     CHECK_UPDATES: 'checkUpdates',  // { id? }
-    INSTALL: 'install',             // { source: 'catalog'|'github'|'url'|'file', ref }
+    INSTALL: 'install',             // { source: 'catalog'|'github'|'url'|'file', ref, asset? } — asset: an exact release file name
+    UPDATE_ALL: 'updateAll',        // { includeRebuilt? } — install every app with an update, one after another
+    LIST_RELEASE: 'listRelease',    // { ref: 'owner/repo' } — every package file in its newest release
+    GET_REPOSITORIES: 'getRepositories', // -
+    ADD_REPOSITORY: 'addRepository',     // { ref: 'owner/repo' | https catalog URL }
+    REMOVE_REPOSITORY: 'removeRepository', // { id }
+    GET_SETTINGS: 'getSettings',    // -
+    SET_SETTINGS: 'setSettings',    // { autoUpdate?: 'off'|'check'|'install' }
     LIST_DIR: 'listDir',            // { path }
     SUBMIT_ACCESS_INFO: 'submitAccessInfo', // { accessToken, userId, email }
     FORGET_CERTS: 'forgetCerts',    // -
@@ -21,7 +28,11 @@ const Outbound = {
     HELLO: 'hello',                 // { ok, needsPin } — plus { pin, port, addresses, url, build } on loopback
     STATE: 'state',                 // DeviceState
     LOG: 'log',                     // { lines: [LogLine], uptime }
-    CATALOG: 'catalog',             // { entries: [CatalogEntry], stale, source }
+    CATALOG: 'catalog',             // { entries: [CatalogEntry], stale, source, repositories }
+    RELEASE: 'release',             // { repo, tag, publishedAt, assets: [{ name, size, sha256 }] }
+    REPOSITORIES: 'repositories',   // { repositories: [Repository] }
+    SETTINGS: 'settings',           // { autoUpdate, lastCheck, lastResult }
+    UPDATE_RUN: 'updateRun',        // { running, index, total, current?, updated: [], failed: [], trigger }
     PROGRESS: 'progress',           // { phase, detail?, identity? }
     DONE: 'done',                   // { packageId, appId }
     ERROR: 'error',                 // { code, message, remedy?, fatal }
@@ -63,7 +74,11 @@ const ErrorCode = {
     AUTHOR_MISMATCH: 'authorMismatch',
     CERT_CHAIN_INVALID: 'certChainInvalid',
     SECURITY_ERROR: 'securityError',
-    PRIVILEGE_TOO_HIGH: 'privilegeTooHigh'
+    PRIVILEGE_TOO_HIGH: 'privilegeTooHigh',
+
+    CHECKSUM_MISMATCH: 'checksumMismatch',
+    TOO_LARGE: 'tooLarge',
+    BUSY: 'busy'
 };
 
 function ProtocolError(code, message) {
@@ -74,6 +89,13 @@ function ProtocolError(code, message) {
 }
 
 const INSTALL_SOURCES = ['catalog', 'github', 'url', 'file'];
+
+const AUTO_UPDATE = ['off', 'check', 'install'];
+
+// Long enough for any real reference, short enough that nothing is stored or logged by the kilobyte.
+const MAX_REF = 512;
+
+const shortString = (value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_REF;
 
 function parse(raw) {
     let msg;
@@ -101,9 +123,31 @@ function parse(raw) {
         if (INSTALL_SOURCES.indexOf(payload.source) === -1) {
             throw ProtocolError(ErrorCode.BAD_MESSAGE, `Unknown install source: ${payload.source}`);
         }
-        if (typeof payload.ref !== 'string' || !payload.ref) {
+        if (!shortString(payload.ref)) {
             throw ProtocolError(ErrorCode.BAD_MESSAGE, 'Install ref must be a non-empty string.');
         }
+        if ('asset' in payload && payload.asset !== null && !shortString(payload.asset)) {
+            throw ProtocolError(ErrorCode.BAD_MESSAGE, 'An asset is the exact name of one release file.');
+        }
+        if ('asset' in payload && payload.asset !== null && payload.source !== 'github') {
+            throw ProtocolError(ErrorCode.BAD_MESSAGE, 'Only a GitHub install picks a release file.');
+        }
+    }
+
+    if ((msg.type === Inbound.LIST_RELEASE || msg.type === Inbound.ADD_REPOSITORY) && !shortString(payload.ref)) {
+        throw ProtocolError(ErrorCode.BAD_MESSAGE, `${msg.type} requires a ref.`);
+    }
+
+    if (msg.type === Inbound.REMOVE_REPOSITORY && !shortString(payload.id)) {
+        throw ProtocolError(ErrorCode.BAD_MESSAGE, 'removeRepository requires the id of one repository.');
+    }
+
+    if (msg.type === Inbound.UPDATE_ALL && 'includeRebuilt' in payload && typeof payload.includeRebuilt !== 'boolean') {
+        throw ProtocolError(ErrorCode.BAD_MESSAGE, 'updateAll takes includeRebuilt as a boolean, or nothing.');
+    }
+
+    if (msg.type === Inbound.SET_SETTINGS && 'autoUpdate' in payload && AUTO_UPDATE.indexOf(payload.autoUpdate) === -1) {
+        throw ProtocolError(ErrorCode.BAD_MESSAGE, `autoUpdate is one of ${AUTO_UPDATE.join(', ')}.`);
     }
 
     if (msg.type === Inbound.CHECK_UPDATES && 'id' in payload && payload.id !== null &&
@@ -146,6 +190,8 @@ module.exports = {
     Phase,
     ErrorCode,
     ProtocolError,
+    AUTO_UPDATE,
+    MAX_REF,
     parse,
     encode
 };

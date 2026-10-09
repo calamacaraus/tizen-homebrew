@@ -6,6 +6,11 @@ const { createHash } = require('crypto');
 
 const sources = require('./sources.js');
 const manifest = require('./manifest.js');
+const zip = require('./zip.js');
+
+// Re-signing unpacks every file into memory, so an archive that says it expands past this is refused before
+// it is opened — a zip bomb would otherwise end the service partway through an install.
+const MAX_EXPANDED = 512 * 1024 * 1024;
 const preview = require('./preview.js');
 const installer = require('./installer.js');
 const { size, took, rate } = require('../obs/units.js');
@@ -23,7 +28,7 @@ const createInstaller = ({ sdb, device, config, resigner, store, log }) => {
     const install = async (request, report = () => {}) => {
         if (store.select('installing')) {
             say.warn('refused: an install is already running');
-            throw refuse('internal', 'An install is already running.');
+            throw refuse('busy', 'An install is already running.');
         }
 
         store.update({ installing: true });
@@ -69,22 +74,39 @@ const createInstaller = ({ sdb, device, config, resigner, store, log }) => {
 
             const began = Date.now();
 
-            const { archive, name } = await sources.resolve({
+            const { archive, name, expected, origin } = await sources.resolve({
                 ...request,
                 catalog: store.select('catalog') || [],
                 log
             });
 
             const spent = Date.now() - began;
+            const sha256 = createHash('sha256').update(archive).digest('hex');
 
             say.ok(`got ${name}: ${size(archive.length)} in ${took(spent)} (${rate(archive.length, spent)})`);
-            say.info(`sha256 ${createHash('sha256').update(archive).digest('hex').slice(0, 16)}…`);
 
-            return { ...carried, archive, name };
+            // Checked before anything reads the archive: a file that is not the one published is not
+            // opened, signed or installed, whatever it says it is.
+            if (expected && expected !== sha256) {
+                throw refuse('checksumMismatch',
+                    `${name} does not match its published sha256 (expected ${expected.slice(0, 16)}…, ` +
+                    `got ${sha256.slice(0, 16)}…). It was not installed.`);
+            }
+
+            say.info(`sha256 ${sha256.slice(0, 16)}…${expected ? ' — matches the published checksum' : ''}`);
+
+            return { ...carried, archive, name, sha256, verified: Boolean(expected), origin: origin || null };
         };
 
         // Read as it arrived: a file that is not a package should be refused before anything signs it.
         const readIdentity = (carried) => {
+            const expanded = zip.expandedSize(zip.fromBuffer(carried.archive));
+
+            if (expanded !== null && expanded > MAX_EXPANDED) {
+                throw refuse('tooLarge', `${carried.name || 'That package'} expands to ${size(expanded)}, ` +
+                    `more than the ${size(MAX_EXPANDED)} this TV re-signs in memory.`);
+            }
+
             const identity = manifest.identify(carried.archive);
 
             say.info(`identified ${identity.name || 'an unnamed package'} ${identity.version || ''} ` +
@@ -146,19 +168,57 @@ const createInstaller = ({ sdb, device, config, resigner, store, log }) => {
             return carried;
         };
 
+        // Every catalog entry this install answers for: the one asked for, and any other that names the
+        // same file — a collection's Alpha installed from the GitHub tab is still that entry's Alpha.
+        const entriesFor = (carried) => {
+            const origin = carried.origin || {};
+            const listed = store.select('catalog') || [];
+
+            const same = listed.filter((entry) => {
+                if (origin.type === 'github' && entry.source.type === 'github') {
+                    if (String(entry.source.ref).toLowerCase() !== String(origin.repo || '').toLowerCase()) return false;
+                    if (!entry.source.asset) return true;
+                    return entry.source.exact ? entry.source.asset === origin.asset : String(origin.asset).indexOf(entry.source.asset) !== -1;
+                }
+
+                return origin.type === 'url' && entry.source.type === 'url' && entry.source.ref === origin.url;
+            }).map((entry) => entry.id);
+
+            if (request.source === 'catalog' && same.indexOf(request.reference) === -1) same.push(request.reference);
+
+            return same;
+        };
+
         const recordOutcome = (carried) => {
             const { packageId, appId, name, version } = carried.identity;
+            const at = new Date().toISOString();
+            const kept = config.read();
 
-            const previous = (config.read().lastInstalled || [])
+            const previous = (kept.lastInstalled || [])
                 .filter((entry) => entry.packageId !== packageId);
 
-            config.update({
-                lastInstalled: [{ packageId, appId, name, version, at: new Date().toISOString() }]
-                    .concat(previous)
-                    .slice(0, 20)
+            const installedFrom = { ...(kept.installedFrom || {}) };
+
+            entriesFor(carried).forEach((id) => {
+                installedFrom[id] = { packageId, version, sha256: carried.sha256 || null, at };
             });
 
-            return { packageId, appId, name, version };
+            // Bounded, newest kept: a television does not hold two hundred apps, and the file sits with the keys.
+            const ids = Object.keys(installedFrom);
+            if (ids.length > 200) {
+                ids.sort((a, b) => String(installedFrom[b].at).localeCompare(String(installedFrom[a].at)))
+                    .slice(200)
+                    .forEach((id) => { delete installedFrom[id]; });
+            }
+
+            config.update({
+                lastInstalled: [{ packageId, appId, name, version, sha256: carried.sha256 || null, at }]
+                    .concat(previous)
+                    .slice(0, 20),
+                installedFrom
+            });
+
+            return { packageId, appId, name, version, sha256: carried.sha256 || null, verified: Boolean(carried.verified) };
         };
 
         try {

@@ -28,7 +28,12 @@ const store = createStore({
     from: 0,
     rows: null,
     themeOn: false,
-    restarting: false
+    restarting: false,
+
+    apps: [],
+    updateRun: null,
+    autoUpdate: null,
+    checking: false
 });
 
 const started = Date.now();
@@ -144,8 +149,10 @@ const close = () => {
 
     store.update({ view: 'main', from: 0, rows: null });
 
-    keys.focus(view === 'credits' ? 'credits' : 'logs');
+    keys.focus(view === 'credits' ? 'credits' : view === 'apps' ? 'apps' : 'logs');
 };
+
+const NEXT_MODE = { off: 'check', check: 'install', install: 'off' };
 
 const scroll = (steps, page) => store.update((state) => {
     const { rows, total } = windowOf(state);
@@ -167,6 +174,23 @@ const actions = {
     theme: () => channel.toggle(),
     logs: () => open('logs'),
     credits: () => open('credits'),
+    apps: () => {
+        open('apps');
+        link.send('getCatalog', {});
+        keys.focus('apps:update');
+    },
+    'apps:check': () => {
+        if (store.get().checking) return;
+        store.update({ checking: true });
+        link.send('checkUpdates', {});
+    },
+    'apps:update': () => {
+        const run = store.get().updateRun;
+        if (run && run.running) return;
+        store.update({ updateRun: { running: true, index: 0, total: 0, updated: [], failed: [] } });
+        link.send('updateAll', {});
+    },
+    'apps:auto': () => link.send('setSettings', { autoUpdate: NEXT_MODE[store.get().autoUpdate] || 'check' }),
     close: () => close(),
     pop: () => water.popAll(),
     restart: () => restart(),
@@ -194,6 +218,9 @@ const keys = remote({
         }
 
         if (view === 'main' || !SCROLLS[keyCode]) return false;
+
+        // The apps screen has buttons across its head: left and right move between them.
+        if (view === 'apps' && (keyCode === KEY.left || keyCode === KEY.right)) return false;
 
         scroll(...SCROLLS[keyCode]);
         return true;
@@ -273,7 +300,10 @@ const Send = {
 const Receive = {
     hello: 'hello',
     state: 'state',
-    log: 'log'
+    log: 'log',
+    catalog: 'catalog',
+    settings: 'settings',
+    updateRun: 'updateRun'
 };
 
 let sinceSeq = 0;
@@ -291,7 +321,12 @@ const relaunch = () => launchService().then(
 // GET /pin has always trusted that, then accepted once the code is handed back. Nothing is typed in here,
 // and the code is kept across restarts, so a reboot does not strand the phone that paired.
 const greeted = (payload) => {
-    if (payload.ok) return link.send(Send.watch, { logsSince: sinceSeq });
+    if (payload.ok) {
+        link.send(Send.watch, { logsSince: sinceSeq });
+        link.send('getSettings', {});
+        link.send('getCatalog', {});
+        return;
+    }
 
     if (!payload.pin) {
         say('the service would not say what its pairing code is', 'err');
@@ -405,5 +440,24 @@ const link = openSocket({
         if (type === Receive.hello) return greeted(payload);
         if (type === Receive.log) return logged(payload);
         if (type === Receive.state) return store.update({ ready: payload.sdbReachable });
+        if (type === Receive.catalog) return store.update({ apps: payload.entries || [], checking: false });
+        if (type === Receive.settings) return store.update({ autoUpdate: payload.autoUpdate });
+
+        if (type === Receive.updateRun) {
+            store.update({ updateRun: payload });
+            if (!payload.running) link.send('getCatalog', {});
+            return undefined;
+        }
+
+        // A failure the television asked for — the phone shows its own; this one only needs unsticking.
+        if (type === 'error') {
+            store.update((state) => ({
+                checking: false,
+                updateRun: state.updateRun && state.updateRun.running ? { ...state.updateRun, running: false, error: payload.message } : state.updateRun
+            }));
+            say(`refused: ${payload.message}`, 'warn');
+        }
+
+        return undefined;
     }
 });

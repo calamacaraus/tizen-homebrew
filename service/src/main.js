@@ -2,7 +2,7 @@
 
 const { createServer } = require('http');
 const { readFileSync, existsSync } = require('fs');
-const { join, extname, normalize } = require('path');
+const { join, extname, normalize, sep } = require('path');
 const { homedir } = require('os');
 
 const { startRecording, Facility } = require('./obs/log.js');
@@ -27,6 +27,8 @@ const protocol = require('./protocol.js');
 const { createInstaller } = require('./install/pipeline.js');
 const { createCatalog } = require('./install/catalog.js');
 const { createUpdates } = require('./install/updates.js');
+const { createLibrary } = require('./install/library.js');
+const { createAutoUpdate } = require('./install/autoupdate.js');
 
 const { ErrorCode } = protocol;
 
@@ -76,7 +78,8 @@ const start = () => {
         catalog: [],
         catalogStale: false,
         lockout: pin.fresh(),
-        device: null
+        device: null,
+        updateRun: null
     });
 
     const stored = config.read().catalogUrl;
@@ -84,6 +87,9 @@ const start = () => {
     const catalogCache = join(homedir(), 'share', 'homebrewCatalog.json');
 
     const catalog = createCatalog({ url: catalogUrl, cachePath: catalogCache, log });
+
+    // The built-in catalog plus every repository added on the phone, as one list.
+    const library = createLibrary({ config, official: catalog, cacheDir: join(homedir(), 'share'), log });
 
     // No prime() at startup: priming getPackagesInfo wedges the service on Tizen 9.0.
     const updates = createUpdates({ packages, log, config });
@@ -99,7 +105,7 @@ const start = () => {
 
     if (relay.enabled) log.on(Facility.RELAY).warn('the command relay is ON from stored configuration');
 
-    // Loaded on first use so a television that never installs anything does not parse node-forge.
+    // Loaded on first use so a television that never installs anything does not parse the signer.
     const resigner = async () => {
         const { resign } = require('./install/resign.js');
 
@@ -107,6 +113,17 @@ const start = () => {
     };
 
     const installer = createInstaller({ sdb, device, config, resigner, store, log });
+
+    // Filled in once the socket server is up, at the end of this function. The device sweep and the
+    // auto-updater are the only things that learn something without being asked, so they push.
+    let sockets = null;
+
+    const autoUpdate = createAutoUpdate({
+        library, updates, installer, config, store, log,
+        broadcast: (type, payload) => { if (sockets) sockets.broadcastPaired(type, payload); }
+    });
+
+    if (device.onTv) autoUpdate.start();
 
     const announce = (state, previous) => {
         if (!previous) {
@@ -136,9 +153,8 @@ const start = () => {
         return state;
     };
 
-    // Filled in once the socket server is up, at the end of this function. The sweep below is the
-    // only thing that learns something without being asked, so it is the only thing that pushes.
-    let sockets = null;
+    // Filled in once the socket server is up, at the end of this function; declared up there, beside
+    // the auto-updater that also pushes through it.
 
     const refreshDevice = async () => {
         // An install has the connection; probing across it would only add commands to what sdbd is doing.
@@ -280,7 +296,7 @@ const start = () => {
 
         const repl = createRepl({
             require, process, log, store, config, secret,
-            catalog, updates, installer, relay, device, sdb, packages, platform, runtime, memory
+            catalog, library, updates, autoUpdate, installer, relay, device, sdb, packages, platform, runtime, memory
         });
 
         const gate = (request, response) => {
@@ -448,7 +464,8 @@ const start = () => {
         const file = join(uiRoot, normalize(requested));
 
         // Confirms the collapsed path is still inside the UI directory — this would serve any file on the TV.
-        if (!file.startsWith(uiRoot) || !existsSync(file)) {
+        // Compared with the separator, or `ui/dist-old` would count as inside `ui/dist`.
+        if (!file.startsWith(uiRoot + sep) || !existsSync(file)) {
             return failure(response, 404, ErrorCode.NOT_FOUND, `No such file: ${requested}`);
         }
 
@@ -467,7 +484,18 @@ const start = () => {
             : type);
     });
 
-    const server = createServer(router.listener);
+    const { allowedHost } = require('./http/hosts.js');
+
+    const server = createServer((request, response) => {
+        if (!allowedHost(request.headers.host)) {
+            net.warn(`refused a request for the host "${request.headers.host}" — not an address this TV answers to`);
+            return failure(response, 403, ErrorCode.UNAUTHORIZED,
+                'Reach this TV by its IP address. (A development machine reaching it by name can list that name ' +
+                'in HOMEBREW_HOSTNAMES.)');
+        }
+
+        return router.listener(request, response);
+    });
 
     // A failed bind arrives as an event, so without this nothing listens and nothing says so.
     server.on('error', (error) => {
@@ -495,7 +523,7 @@ const start = () => {
     });
 
     sockets = require('./socket.js').attach({
-        server, store, secret, authorise, installer, catalog, updates, relay, refreshDevice,
+        server, store, secret, authorise, installer, library, updates, autoUpdate, relay, refreshDevice,
         fromLoopback, greeting: () => ({ ...pairing(), build: BUILD }), recorded, config, protocol, log
     });
 

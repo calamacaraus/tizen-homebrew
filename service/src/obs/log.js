@@ -17,6 +17,7 @@ const Facility = {
     SDB:   'sdb',
     PKG:   'pkg',
     CAT:   'cat',
+    UPD:   'upd',
     RELAY: 'relay',
     CFG:   'cfg'
 };

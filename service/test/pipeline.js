@@ -97,7 +97,7 @@ const run = async () => {
         });
 
         const refused = await install({ source: 'upload', upload: realPackage }).catch((e) => e);
-        check('a second concurrent install is refused', refused.code === 'internal', String(refused.code));
+        check('a second concurrent install is refused, as busy', refused.code === 'busy', String(refused.code));
     }
 
     {

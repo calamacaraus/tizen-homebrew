@@ -17,7 +17,7 @@
 // first version of this reader only walked local headers and trusted their sizes, so it read an
 // empty config.xml out of them ("unexpected end of file") or walked off into the data.
 
-const { inflateRawSync } = require('zlib');
+const { inflateRawSync, constants } = require('zlib');
 
 const LOCAL_HEADER = 0x04034b50;
 const CENTRAL_HEADER = 0x02014b50;
@@ -31,6 +31,17 @@ const LONGEST_COMMENT = 0xffff;
 // Stored and deflate are all a .wgt or .tpk uses; anything else is not something to guess at.
 const STORED = 0;
 const DEFLATE = 8;
+
+// The most any one entry read here may expand to: a manifest or an icon is kilobytes.
+const MAX_ENTRY = 8 * 1024 * 1024;
+
+// Deflate cannot expand by more than about 1032 to 1, so this much compressed input can never inflate to
+// more than MAX_ENTRY in one step.
+const STEP = Math.floor(MAX_ENTRY / 1100);
+
+// A manifest or an icon is never this large compressed; anything bigger is not read. Kept small because
+// the step-wise inflate below re-reads its prefix, so its work grows with the square of this.
+const MAX_COMPRESSED = 256 * 1024;
 
 // A source is anything with a size and a way to read a range: a Buffer, or an open file on a USB
 // stick that should not be pulled into memory whole to read 2KB of XML from it.
@@ -50,11 +61,35 @@ const fromFile = (handle, size, readSync) => ({
     }
 });
 
+// Bounded without trusting anything the archive declares: the television's runtime (lwnode, Node 12.16)
+// predates inflate's maxOutputLength, and a declared size is only a claim. So the data is inflated a step
+// at a time — each prefix with a sync flush, which yields what that much input decodes to — and abandoned
+// as soon as the output passes the cap. No step can add more than MAX_ENTRY, so memory stays near twice
+// the cap however the entry was built; the price is re-reading the prefix, which for the kilobytes a
+// manifest or icon takes is nothing.
+// `expected` is the size the archive declares: passing it is reason to stop early, since an entry that
+// inflates past its own declaration is refused afterwards anyway.
+const boundedInflate = (data, expected = null) => {
+    if (data.length > MAX_COMPRESSED) return null;
+
+    const limit = typeof expected === 'number' && expected > 0 ? Math.min(expected, MAX_ENTRY) : MAX_ENTRY;
+
+    for (let end = Math.min(STEP, data.length); ; end = Math.min(end + STEP, data.length)) {
+        const whole = end === data.length;
+        const out = inflateRawSync(data.slice(0, end), whole ? {} : { finishFlush: constants.Z_SYNC_FLUSH });
+
+        if (out.length > limit) return null;
+        if (whole) return out;
+    }
+};
+
 const inflate = (compression, data, expected) => {
-    if (compression === STORED) return data;
+    if (typeof expected === 'number' && expected > MAX_ENTRY) return null;
+    if (compression === STORED) return data.length > MAX_ENTRY ? null : data;
     if (compression !== DEFLATE) return null;
 
-    const out = inflateRawSync(data);
+    const out = boundedInflate(data, expected);
+    if (!out) return null;
 
     // A size the archive declared and the data disagree with is a damaged package, not a short read.
     if (typeof expected === 'number' && expected > 0 && out.length !== expected) return null;
@@ -200,9 +235,15 @@ const read = (source, wanted) => {
     return fromLocalHeaders(source.read(0, source.size), wanted);
 };
 
+// What the archive says it expands to in all, from its directory; null when there is none to ask.
+const expandedSize = (source) => {
+    const listed = centralEntries(source);
+    return listed ? listed.reduce((total, entry) => total + entry.size, 0) : null;
+};
+
 const names = (source) => {
     const listed = centralEntries(source);
     return listed ? listed.map((entry) => entry.name) : null;
 };
 
-module.exports = { read, names, fromBuffer, fromFile, centralEntries, LOCAL_HEADER };
+module.exports = { read, names, expandedSize, fromBuffer, fromFile, centralEntries, boundedInflate, LOCAL_HEADER, MAX_ENTRY };
