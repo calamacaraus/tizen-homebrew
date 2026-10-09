@@ -26,7 +26,7 @@ const insideMedia = (path) => {
 const WebSocket = require('ws');
 
 const preview = require('./install/preview.js');
-const { allowedHost } = require('./http/hosts.js');
+const { allowedHost, isLoopback, trustedOrigin } = require('./http/hosts.js');
 const sources = require('./install/sources.js');
 const customize = require('./install/customize.js');
 const { took, host } = require('./obs/units.js');
@@ -61,7 +61,6 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
         if (!origin) return true;
 
         const address = (info.req && info.req.socket && info.req.socket.remoteAddress) || '';
-        const loopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].indexOf(address) !== -1;
 
         let parsed = null;
 
@@ -73,12 +72,14 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
 
         const web = parsed && (parsed.protocol === 'http:' || parsed.protocol === 'https:');
 
-        if (!web) return loopback;
+        // A packaged page only from the television itself; a web page only from this service.
+        if (!web) {
+            const allowed = isLoopback(address) && trustedOrigin(origin, headers.host);
+            if (!allowed && auth && isLoopback(address)) auth.warn(`refused a socket on loopback from origin "${String(origin).slice(0, 60)}"`);
+            return allowed;
+        }
 
-        const host = String(headers.host || '').toLowerCase();
-        const local = ['localhost', '127.0.0.1', '[::1]'].indexOf(parsed.hostname.toLowerCase()) !== -1;
-
-        return parsed.host.toLowerCase() === host || local;
+        return trustedOrigin(origin, headers.host);
     };
 
     // Every message is a small JSON frame; uploads go over HTTP. Left at ws's 100MB default, one frame
@@ -104,7 +105,24 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
     // run's progress, and a setting someone changed.
     const paired_ = [];
 
+    // A phone that leaves the network sends no goodbye; without a ping it stays on every list, and keeps
+    // its log subscription, until a write to it finally fails many minutes later.
+    const HEARTBEAT = 30000;
+    const heartbeat = setInterval(() => {
+        wsServer.clients.forEach((client) => {
+            if (client.__homebrewAlive === false) return client.terminate();
+            client.__homebrewAlive = false;
+            try { client.ping(); } catch (e) { /* closing */ }
+            return undefined;
+        });
+    }, HEARTBEAT);
+    if (heartbeat.unref) heartbeat.unref();
+    wsServer.on('close', () => clearInterval(heartbeat));
+
     wsServer.on('connection', (socket, request) => {
+        socket.__homebrewAlive = true;
+        socket.on('pong', () => { socket.__homebrewAlive = true; });
+
         let paired = false;
         let unwatch = null;
 
@@ -156,6 +174,9 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
                 message: (error && error.message) || 'Unexpected failure.',
                 // Only on failures verdicts.js recognized: what to do, which the UI cannot know.
                 remedy: (error && error.remedy) || null,
+                // A refusal the phone may answer with "do it anyway".
+                confirmable: Boolean(error && error.confirmable),
+                packageId: (error && error.confirmable && error.packageId) || null,
                 fatal: false
             });
         };
@@ -181,7 +202,7 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
         };
 
         const greet = async ({ pin }) => {
-            const verdict = authorise(pin);
+            const verdict = authorise(pin, request);
 
             if (!verdict.ok) {
                 if (auth) auth.warn(`${client} ${verdict.code === ErrorCode.LOCKED_OUT ? 'is locked out' : 'gave the wrong PIN'}`);
@@ -217,7 +238,11 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
         // One app asks GitHub about that app; everything also asks each collection what its newest
         // release holds now, so a rebuilt file in one is seen without a full refresh.
         const checkUpdates = async ({ id }) => {
-            const result = id ? null : await library.fetch({ refresh: 'collections' });
+            // One app of a collection is checked by asking its repository what its newest release holds now.
+            const asked = id ? (store.select('catalog') || []).find((entry) => entry.id === id) : null;
+            const refresh = !id ? 'collections' : asked && asked.collection ? { repository: asked.repository } : null;
+
+            const result = refresh ? await library.fetch({ refresh }) : null;
             if (result) store.update({ catalog: result.entries, catalogStale: result.stale });
 
             const entries = store.select('catalog') || [];
@@ -379,7 +404,7 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
 
         const describe = ({ source, ref }) => `${source} ${ref}`;
 
-        const runInstall = async ({ source, ref, asset }) => {
+        const runInstall = async ({ source, ref, asset, confirm, expect }) => {
             if (source === 'file' && !insideMedia(ref)) {
                 return sendFailure(ProtocolError(ErrorCode.NOT_FOUND, 'Only a package on removable storage can be installed from a file.'));
             }
@@ -388,7 +413,7 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
 
             try {
                 const outcome = await installer.install(
-                    { source, reference: ref, asset: asset || null },
+                    { source, reference: ref, asset: asset || null, confirm: confirm === true, expect: expect || null },
                     (phase, detail, extra) => send(Outbound.PROGRESS, {
                         phase,
                         detail: detail || null,

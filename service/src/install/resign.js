@@ -51,17 +51,33 @@ const devicesOf = (certificates) => {
 
 const deviceOf = (certificates) => devicesOf(certificates)[0] || null;
 
-const resign = async (archive, certificates) => {
+// `given` is the package, or a holder with take() (pipeline.js) that hands it over without the caller
+// keeping it: either way it is let go once unpacked. With `options.toFile` the signed package is written to
+// that path (created new) and described by { path, size, sha256 } instead of returned as a buffer.
+const resign = async (given, certificates, options = {}) => {
+    // The whole package unpacked, the same ceiling pipeline.js holds its declared size to.
+    const MAX_TOTAL = 256 * 1024 * 1024;
+
+    let archive = given && typeof given.take === 'function' ? given.take() : given;
+
     const refuse = (message) => Object.assign(new Error(message), { code: 'resignFailed' });
 
     // Each file is inflated as a stream and stopped once it passes the size its archive declared for it, so a
     // package whose sizes lie (a zip bomb) costs at most what it claimed — which pipeline.js has already held
     // to a total — rather than whatever the data expands to. Where JSZip does not expose the declared size,
     // the read is as it always was.
-    const readBounded = (file, name) => {
-        const declared = file._data && typeof file._data.uncompressedSize === 'number' ? file._data.uncompressedSize : null;
+    const readBounded = (file, name, budget) => {
+        const stated = file._data && typeof file._data.uncompressedSize === 'number' ? file._data.uncompressedSize : null;
 
-        if (declared === null || typeof file.internalStream !== 'function') return file.async('nodebuffer');
+        // What this file may come to: what it declares, and never more than is left of the whole package's.
+        const declared = Math.min(stated === null ? budget : stated, budget);
+
+        if (typeof file.internalStream !== 'function') {
+            return file.async('nodebuffer').then((data) => {
+                if (data.length > declared) throw refuse(`${name} expands past what its package allows.`);
+                return data;
+            });
+        }
 
         return new Promise((resolve, reject) => {
             const chunks = [];
@@ -81,7 +97,8 @@ const resign = async (archive, certificates) => {
                     return;
                 }
 
-                chunks.push(Buffer.from(chunk));
+                // JSZip hands Node buffers on Node; copied only if it ever hands something else.
+                chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
             });
 
             stream.on('error', (error) => {
@@ -104,11 +121,15 @@ const resign = async (archive, certificates) => {
     // One file at a time, so at most one is being inflated whatever the package holds.
     const contentsOf = async (zip) => {
         const named = [];
+        let total = 0;
 
         for (const name of Object.keys(zip.files)) {
             if (zip.files[name].dir || SIGNATURE_FILE.test(name)) continue;
 
-            named.push({ uri: encodeURIComponent(name), data: await readBounded(zip.files[name], name) });
+            const data = await readBounded(zip.files[name], name, MAX_TOTAL - total);
+            total += data.length;
+
+            named.push({ uri: encodeURIComponent(name), data });
         }
 
         if (!named.some((file) => MANIFESTS.indexOf(decodeURIComponent(file.uri)) !== -1)) {
@@ -124,19 +145,50 @@ const resign = async (archive, certificates) => {
         return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
     };
 
+    // Written straight to `path` as it is compressed, and hashed on the way: the signed package never exists
+    // in memory whole, nor twice, which building a buffer (chunks, then the joined copy) costs.
+    const repackTo = (files, path) => new Promise((resolve, reject) => {
+        const { createWriteStream, mkdirSync } = require('fs');
+        mkdirSync(require('path').dirname(path), { recursive: true });
+        const { createHash } = require('crypto');
+
+        const zip = files.reduce((out, file) => out.file(decodeURIComponent(file.uri), file.data), new JSZip());
+        const hash = createHash('sha256');
+        let size = 0;
+
+        const out = createWriteStream(path, { flags: 'wx' });
+        const source = zip.generateNodeStream({ type: 'nodebuffer', compression: 'DEFLATE', streamFiles: true });
+
+        source.on('data', (chunk) => { hash.update(chunk); size += chunk.length; });
+        source.on('error', (error) => { out.destroy(); reject(error); });
+        out.on('error', reject);
+        out.on('finish', () => resolve({ path, size, sha256: hash.digest('hex') }));
+
+        source.pipe(out);
+    });
+
     const { author, distributor } = openPair(certificates);
 
-    const zip = await JSZip.loadAsync(archive).catch(() => {
+    let zip = await JSZip.loadAsync(archive).catch(() => {
         throw refuse('That file is not a readable package — a .wgt is a zip, and this one would not open.');
     });
 
     const contents = await contentsOf(zip);
+
+    // Every file is out of it now: the package and JSZip's view of it are not needed for the signed copy.
+    zip = null;
+    archive = null;
 
     // Counted first: `Signature.sign` unshifts its own output into the array it is given.
     const digested = contents.length;
 
     const authored = await new Signature('AuthorSignature', contents).sign(author);
     const signed = await new Signature('DistributorSignature', authored).sign(distributor);
+
+    if (options && options.toFile) {
+        const written = await repackTo(signed, options.toFile);
+        return { ...written, archive: null, device: deviceOf(certificates), files: digested };
+    }
 
     return {
         archive: await repack(signed),

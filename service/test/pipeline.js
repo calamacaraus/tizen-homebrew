@@ -38,8 +38,11 @@ const fakeSdb = (output = 'coreinstall spend time = 1234 ms') => ({
     })
 });
 
-const fakeResigner = () => Promise.resolve(async (archive) => ({
-    archive, device: 'TESTSET', files: 1
+// The pipeline hands the package over in a holder the signer empties (see resign.js).
+const taken = (given) => (given && typeof given.take === 'function' ? given.take() : given);
+
+const fakeResigner = () => Promise.resolve(async (given) => ({
+    archive: taken(given), device: 'TESTSET', files: 1
 }));
 
 const fakeDevice = (state = {}) => ({
@@ -92,7 +95,8 @@ const run = async () => {
     {
         // What the resigner is handed is what gets signed and installed: it has to be the customised copy.
         let signed = null;
-        const capture = () => Promise.resolve(async (archive) => {
+        const capture = () => Promise.resolve(async (given) => {
+            const archive = taken(given);
             signed = archive;
             return { archive, device: 'TESTSET', files: 1 };
         });
@@ -194,7 +198,8 @@ const run = async () => {
             sdb: fakeSdb(),
             device: fakeDevice({ needsResign: false, duid: 'TESTSET' }),
             config: fakeConfig({ author: 'present' }),
-            resigner: () => Promise.resolve(async (archive) => {
+            resigner: () => Promise.resolve(async (given) => {
+                const archive = taken(given);
                 signed.push(archive.length);
                 return { archive, device: 'TESTSET', files: 3 };
             }),

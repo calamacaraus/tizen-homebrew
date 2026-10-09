@@ -18,7 +18,8 @@ const check = (name, ok, detail) => {
 
 const main = async () => {
     const dir = mkdtempSync(join(tmpdir(), 'homebrew-appicons-'));
-    const icons = createAppIcons({ dir });
+    const icons = createAppIcons({ dir, key: 'test-key' });
+    const tokenOf = (packageId) => new URL(`http://x${icons.urlOf(packageId)}`).searchParams.get('t');
 
     {
         const archive = fixture.wgtWithIcon();
@@ -26,10 +27,13 @@ const main = async () => {
 
         check('an installed package\'s icon is kept for the phone',
             icons.fromArchive(archive, identity) && icons.has(identity.packageId) &&
-            /^\/icons\/GJBBYNLkgP\.png\?v=\d+$/.test(icons.urlOf(identity.packageId)), icons.urlOf(identity.packageId));
+            /^\/icons\/GJBBYNLkgP\.png\?v=\d+&t=[0-9a-f]{32}$/.test(icons.urlOf(identity.packageId)), icons.urlOf(identity.packageId));
 
-        const read = icons.read('GJBBYNLkgP.png');
+        const read = icons.read('GJBBYNLkgP.png', tokenOf('GJBBYNLkgP'));
         check('and served back as what it is', read && read.type === 'image/png' && read.bytes.equals(fixture.PIXEL), JSON.stringify(read));
+
+        check('but only to an address carrying its token, so no page can probe which apps are installed',
+            icons.read('GJBBYNLkgP.png') === null && icons.read('GJBBYNLkgP.png', '0'.repeat(32)) === null, 'served');
 
         check('nothing outside the icons is served, by any name',
             icons.read('../config.json') === null && icons.read('GJBBYNLkgP.png/../../x') === null && icons.read('a.svg') === null,
@@ -87,8 +91,26 @@ const main = async () => {
         const official = { fetch: () => Promise.resolve({ entries: [], stale: false, source: 'cache' }) };
         const release = { tag_name: 'v1', assets: [{ name: 'Alpha-Player.wgt', browser_download_url: 'https://x/Alpha-Player.wgt', digest: null }] };
 
-        const library = createLibrary({ config, official, cacheDir, latestRelease: () => Promise.resolve(release) });
+        let current = release;
+        const library = createLibrary({ config, official, cacheDir, latestRelease: () => Promise.resolve(current) });
         const added = await library.add('owner/collection');
+
+        current = { tag_name: 'v2', assets: [{ name: 'Alpha-1.0.47.wgt', browser_download_url: 'https://x/Alpha-1.0.47.wgt', digest: null }] };
+
+        const cached = await library.fetch();
+        const pressedAtOnce = await library.fetch({ refresh: { repository: added.id } });
+
+        const realNow = Date.now;
+        Date.now = () => realNow() + 61 * 1000;
+        const asked = await library.fetch({ refresh: { repository: added.id } });
+        Date.now = realNow;
+
+        check('checking one app of a collection asks that repository again, and only when asked',
+            cached.entries[0].version !== '1.0.47' && asked.entries[0].version === '1.0.47',
+            `${cached.entries[0].version} ${asked.entries[0].version}`);
+
+        check('but pressed again within a minute, the answer just fetched stands',
+            pressedAtOnce.entries[0].version !== '1.0.47', String(pressedAtOnce.entries[0].version));
 
         check('an added repository caches its list', existsSync(join(cacheDir, `homebrewRepo-${added.id}.json`)), readdirSync(cacheDir).join());
 

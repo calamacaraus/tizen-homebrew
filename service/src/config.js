@@ -1,6 +1,7 @@
 'use strict';
 
-const { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync } = require('fs');
+const { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, statSync, openSync, writeSync,
+    fsyncSync, closeSync, copyFileSync, chmodSync } = require('fs');
 const { homedir } = require('os');
 
 const pin = require('./auth/pin.js');
@@ -34,23 +35,111 @@ const DEFAULTS = {
     lastUpdateResult: null   // { available: [names], updated: [names], failed: [names] }
 };
 
-function read() {
-    if (!existsSync(CONFIG_PATH)) return Object.assign({}, DEFAULTS);
+// Parsed once and kept until the file changes: it is read on every catalog message and every install
+// step, and holds the certificates, so parsing it each time was most of the cost of a small request.
+// Frozen, so code that changes what it read without writing it back fails at once rather than quietly.
+let cached = null;
+
+const deepFreeze = (value) => {
+    if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+        Object.freeze(value);
+        Object.keys(value).forEach((key) => deepFreeze(value[key]));
+    }
+    return value;
+};
+
+// Shared by every read of a missing file: frozen, or a push into one of its lists would change what every
+// later read sees.
+deepFreeze(DEFAULTS);
+
+// A file that will not parse is never written over with defaults: that would replace the signing keys
+// and the PIN with nothing. The last good copy is used instead, and the damaged one moved aside for a person
+// to look at.
+const BACKUP_PATH = `${CONFIG_PATH}.bak`;
+
+const parseFile = (path) => {
+    const stat = statSync(path);
+    return { mtimeMs: stat.mtimeMs, size: stat.size, parsed: deepFreeze(JSON.parse(readFileSync(path, 'utf8'))) };
+};
+
+const recover = (error) => {
+    console.error(`Config at ${CONFIG_PATH} is unreadable (${error.message}); trying the last good copy`);
+
     try {
-        const parsed = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
-        return Object.assign({}, DEFAULTS, parsed);
+        renameSync(CONFIG_PATH, `${CONFIG_PATH}.damaged-${Date.now()}`);
+    } catch (e) { /* already gone */ }
+
+    try {
+        const good = parseFile(BACKUP_PATH);
+        writeFileSync(`${CONFIG_PATH}.tmp`, JSON.stringify(good.parsed, null, 4), { mode: 0o600 });
+        renameSync(`${CONFIG_PATH}.tmp`, CONFIG_PATH);
+        cached = parseFile(CONFIG_PATH);
+        console.error('Config restored from its last good copy');
+        return Object.assign({}, DEFAULTS, cached.parsed);
     } catch (e) {
-        console.error(`Config at ${CONFIG_PATH} is unreadable, using defaults: ${e.message}`);
+        cached = null;
+        console.error(`No usable copy either (${e.message}); starting from defaults`);
         return Object.assign({}, DEFAULTS);
+    }
+};
+
+function read() {
+    // Missing is a fresh start (a rename never leaves none); only a damaged file is recovered.
+    if (!existsSync(CONFIG_PATH)) return Object.assign({}, DEFAULTS);
+
+    try {
+        const stat = statSync(CONFIG_PATH);
+
+        if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) cached = parseFile(CONFIG_PATH);
+
+        return Object.assign({}, DEFAULTS, cached.parsed);
+    } catch (e) {
+        // Only a file that does not parse is damaged. A read that failed for another reason — too many open
+        // files, a busy flash — says nothing about the file: the copy last read stands, or the error is
+        // raised, rather than a good file being moved aside for a backup one change older.
+        if (e instanceof SyntaxError) return recover(e);
+        if (cached) return Object.assign({}, DEFAULTS, cached.parsed);
+        throw e;
     }
 }
 
 function write(config) {
     if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR);
-        const tmp = `${CONFIG_PATH}.tmp`;
-    // The private signing keys live in this file, so it is readable by its owner and nobody else.
-    writeFileSync(tmp, JSON.stringify(config, null, 4), { mode: 0o600 });
+    const tmp = `${CONFIG_PATH}.tmp`;
+    const serialized = JSON.stringify(config, null, 4);
+
+    // The private signing keys live in this file, so it is readable by its owner and nobody else — and a
+    // leftover temporary file is removed first, since writing into one would keep its old permissions.
+    try { unlinkSync(tmp); } catch (e) { /* none */ }
+
+    // Flushed to the flash before it replaces the old file, so power lost a moment later leaves one whole
+    // file or the other, never half of the new one.
+    const handle = openSync(tmp, 'w', 0o600);
+    try {
+        writeSync(handle, serialized);
+        fsyncSync(handle);
+    } finally {
+        closeSync(handle);
+    }
+
+    // The file it replaces becomes the last good copy.
+    if (existsSync(CONFIG_PATH)) {
+        try {
+            JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
+            copyFileSync(CONFIG_PATH, BACKUP_PATH);
+            chmodSync(BACKUP_PATH, 0o600);
+        } catch (e) { /* not a good copy: the older backup stays */ }
+    }
+
     renameSync(tmp, CONFIG_PATH);
+
+    try {
+        const stat = statSync(CONFIG_PATH);
+        cached = { mtimeMs: stat.mtimeMs, size: stat.size, parsed: deepFreeze(JSON.parse(serialized)) };
+    } catch (e) {
+        cached = null;
+    }
+
     return config;
 }
 

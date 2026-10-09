@@ -58,6 +58,8 @@ const EXPLANATIONS = {
     checksumMismatch: 'The download is not the file that was published.',
     tooLarge: 'That package is too large to install.',
     busy: 'Something is already installing.',
+    replacesOther: 'That would replace an app installed from somewhere else.',
+    packageMismatch: 'The download is not the app it was listed as.',
     savedNotApplied: 'Saved. Homebrew cannot fetch this app again by itself — install it once more (its row on the apps tab, or where it came from) and the change shows.'
 };
 
@@ -99,6 +101,7 @@ const store = createStore({
     // Typed into, never painted from: a repaint per keystroke would take the field and its focus with it.
     // Read when something else repaints the panel (choosing an icon), so what was typed survives.
     customDraft: { name: '' },
+    confirming: null,
 
     tab: 'catalog',
     github: '',
@@ -134,8 +137,10 @@ const channel = theme({
 const { send } = connect({
     // A connection that is not up cannot be pairing, or a phone that cannot reach its TV sits on "offering the
     // code" with no field to type into.
+    // A dropped connection takes the install's progress with it: the service answers only the socket that
+    // asked, so a phase left set would hold every install button disabled until the page was reloaded.
     onStatus: (connection) => store.update(
-        connection === 'connected' ? { connection } : { connection, pending: '', restoring: false }
+        connection === 'connected' ? { connection } : { connection, pending: '', restoring: false, phase: null }
     ),
 
     onMessage: (type, payload) => {
@@ -274,7 +279,9 @@ const { send } = connect({
                     error: {
                         title: EXPLANATIONS[payload.code] || 'Failed.',
                         detail: payload.message || '',
-                        remedy: payload.remedy || null
+                        remedy: payload.remedy || null,
+                        confirmable: Boolean(payload.confirmable),
+                        packageId: payload.packageId || null
                     }
                 };
             }
@@ -299,10 +306,19 @@ const value = (id) => {
     return element ? element.value.trim() : '';
 };
 
-const beginInstall = (source, reference, asset = null) => {
+// The last install asked for, so a refusal that can be overruled is answered by sending it again.
+let lastInstall = null;
+
+// `confirmed`: the package id a refusal named, sent back so only that package is allowed through.
+const beginInstall = (source, reference, asset = null, confirmed = null) => {
+    // One at a time: the TV refuses a second while the first runs, so it is not sent.
+    const now = store.get();
+    if (now.phase && !now.error && !now.done) return;
+
     // The identity goes with it, or one app's icon sits above another app's progress bar.
     store.update({ error: null, done: null, phase: 'probing', identity: null });
-    send(Send.install, asset ? { source, ref: reference, asset } : { source, ref: reference });
+    lastInstall = { source, ref: reference, ...(asset ? { asset } : {}) };
+    send(Send.install, confirmed ? { ...lastInstall, confirm: true, expect: confirmed } : lastInstall);
 };
 
 // Read now rather than after the upload, because the value of it is seeing what this is before spending a
@@ -550,6 +566,30 @@ delegate({
         store.update({ tab: name });
         if (name === 'usb') send(Send.listDir, { path: store.get().usbPath });
         if (name === 'repos') send(Send.repositories, {});
+
+        // The chosen tab brought into view: at phone width the last ones sit past the edge.
+        const selected = document.querySelector('.tab[aria-selected="true"]');
+        if (selected && selected.scrollIntoView) {
+            try { selected.scrollIntoView({ inline: 'center', block: 'nearest' }); } catch (e) { selected.scrollIntoView(false); }
+        }
+    },
+
+    // The first tap of a destructive action asks; the second, within a few seconds, does it.
+    confirm: (_element, action) => {
+        store.update({ confirming: action });
+        setTimeout(() => { if (store.get().confirming === action) store.update({ confirming: null }); }, 4000);
+    },
+
+    filter: (element) => {
+        filterText = element.value;
+        applyFilter();
+    },
+
+    'install:anyway': () => {
+        const refused = store.get().error;
+        if (lastInstall && refused && refused.packageId) {
+            beginInstall(lastInstall.source, lastInstall.ref, lastInstall.asset || null, refused.packageId);
+        }
     },
 
     // `install:github:owner/repo` — the source and its reference, in the name.
@@ -589,10 +629,56 @@ delegate({
     }
 }));
 
+// The apps filter, kept out of the store so typing never redraws the list: rows are shown or hidden in place,
+// and again after any redraw, with the field given back its text.
+let filterText = '';
+
+const applyFilter = () => {
+    const wanted = filterText.trim().toLowerCase();
+    const field = document.getElementById('filter');
+    if (field && field.value !== filterText) field.value = filterText;
+
+    Array.prototype.forEach.call(document.querySelectorAll('#panel [data-search]'), (row) => {
+        row.hidden = Boolean(wanted) && row.getAttribute('data-search').indexOf(wanted) === -1;
+    });
+};
+
+// Focus survives a redraw: the control that had it before is given it back, by its data-focus name, so a
+// keyboard or screen-reader user is not thrown back to the top of the page each time the list updates.
+let focusedBefore = null;
+
+store.subscribe(() => {
+    const active = document.activeElement;
+    focusedBefore = active && active !== document.body ? active.getAttribute('data-focus') : null;
+});
+
+// Any tap other than a first "are you sure" withdraws the question.
+document.addEventListener('click', (event) => {
+    const target = event.target.closest && event.target.closest('[data-on-click]');
+    const action = target ? target.getAttribute('data-on-click') : '';
+    if (store.get().confirming && action.indexOf('confirm:') !== 0) store.update({ confirming: null });
+});
+
 mount(store, {
     masthead,
     status: (state) => (state.paired ? status(state) : pairing(state)),
     tabs: (state) => (state.paired ? tabs(state) : { __markup: '' }),
     panel: (state) => (state.paired ? panel(state) : { __markup: '' }),
     outcome: (state) => (state.paired ? outcome(state) : { __markup: '' })
+});
+
+store.subscribe(() => {
+    applyFilter();
+
+    // Pinned to the top only while an install runs: a finished one's result stays where it was, not over the list.
+    const outcomeBox = document.getElementById('outcome');
+    if (outcomeBox) outcomeBox.classList.toggle('pinned', Boolean(store.get().phase) && !store.get().error && !store.get().done);
+
+    const active = document.activeElement;
+    if (focusedBefore && (!active || active === document.body)) {
+        const again = document.querySelector(`[data-focus="${focusedBefore.replace(/"/g, '')}"]`);
+        if (again && !again.disabled) {
+            try { again.focus({ preventScroll: true }); } catch (e) { again.focus(); }
+        }
+    }
 });

@@ -1,6 +1,7 @@
 'use strict';
 
 const { json, failure } = require('./respond.js');
+const { trustedOrigin } = require('./hosts.js');
 const { size, took, host } = require('../obs/units.js');
 
 // Sixty lines in place of express, which was 484KB. Routes match in order; `/*` matches a prefix.
@@ -48,11 +49,35 @@ const createRouter = (options) => {
             });
         }
 
+        // Answered before its body was read — refused, say, before an upload arrived: the client is told the
+        // connection ends with this answer, rather than reusing one with the rest of that body still in it,
+        // where its next request would wait for ever.
+        const writeHead = response.writeHead;
+        response.writeHead = function (...args) {
+            if (!request.complete) this.setHeader('connection', 'close');
+            return writeHead.apply(this, args);
+        };
+
+        // Cross-origin access only for an origin this service trusts (see hosts.js): the phone page is served
+        // from here and needs none, and no other page is to be told it may send the PIN header.
+        const origin = request.headers.origin;
+        const trusted = Boolean(origin) && trustedOrigin(origin, request.headers.host);
+
+        if (trusted) {
+            response.setHeader('access-control-allow-origin', origin);
+            response.setHeader('vary', 'origin');
+        }
+
         if (request.method === 'OPTIONS') {
+            if (!trusted) {
+                response.writeHead(403);
+                return response.end();
+            }
+
             response.writeHead(204, {
-                'access-control-allow-origin': '*',
                 'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
-                'access-control-allow-headers': '*'
+                'access-control-allow-headers': 'content-type, x-homebrew-pin, x-homebrew-name',
+                'access-control-max-age': '600'
             });
             return response.end();
         }

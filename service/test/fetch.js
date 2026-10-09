@@ -143,6 +143,24 @@ const main = async () => {
 
     http.request = realRequest;
 
+    {
+        // A server that sends a byte every 50ms, never idle long enough to time out, and never finishing.
+        const { server, port } = await listen((request, response) => {
+            response.writeHead(200, { 'content-length': 1000000 });
+            const drip = setInterval(() => response.write('x'), 50);
+            response.on('close', () => clearInterval(drip));
+        });
+
+        const began = Date.now();
+        const outcome = await fetch.request(`http://127.0.0.1:${port}/slow`, { timeout: 1000, deadline: 600 })
+            .then(() => 'finished', (error) => error.message);
+
+        check('a download that trickles in forever is given up at its deadline',
+            /did not finish in time/.test(outcome) && Date.now() - began < 1500, `${outcome} after ${Date.now() - began}ms`);
+
+        server.close();
+    }
+
     const failed = results.filter((ok) => !ok).length;
     console.log(`\n${results.length - failed}/${results.length} checks passed.`);
     process.exit(failed ? 1 : 0);

@@ -39,9 +39,9 @@ const MAX_ENTRY = 8 * 1024 * 1024;
 // more than MAX_ENTRY in one step.
 const STEP = Math.floor(MAX_ENTRY / 1100);
 
-// A manifest or an icon is never this large compressed; anything bigger is not read. Kept small because
+// A manifest or an icon is never this large compressed (a 512×512 PNG does not compress below ~300KB); anything bigger is not read. Kept small because
 // the step-wise inflate below re-reads its prefix, so its work grows with the square of this.
-const MAX_COMPRESSED = 256 * 1024;
+const MAX_COMPRESSED = 640 * 1024;
 
 // A source is anything with a size and a way to read a range: a Buffer, or an open file on a USB
 // stick that should not be pulled into memory whole to read 2KB of XML from it.
@@ -246,4 +246,82 @@ const names = (source) => {
     return listed ? listed.map((entry) => entry.name) : null;
 };
 
-module.exports = { read, names, expandedSize, fromBuffer, fromFile, centralEntries, boundedInflate, LOCAL_HEADER, MAX_ENTRY };
+// Every entry inflated as a stream and its output counted, nothing kept: a package whose data expands past
+// what its directory declares — per entry, or past `budget` in all — is found before anything that
+// inflates it whole (JSZip, when a custom icon is written in) gets to try. Resolves to the true total.
+const verifySizes = async (source, budget) => {
+    const { createInflateRaw } = require('zlib');
+    const listed = centralEntries(source);
+
+    if (!listed) throw Object.assign(new Error('The package has no readable directory of its files.'), { code: 'badPackage' });
+
+    let total = 0;
+
+    for (const entry of listed) {
+        const header = source.read(entry.localAt, 30);
+        if (header.length < 30 || header.readUInt32LE(0) !== LOCAL_HEADER) {
+            throw Object.assign(new Error(`${entry.name} is not where the package says it is.`), { code: 'badPackage' });
+        }
+
+        const dataAt = entry.localAt + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
+        const limit = Math.min(entry.size, budget - total);
+
+        const produced = entry.compression === STORED ? entry.compressedSize : await new Promise((resolve, reject) => {
+            if (entry.compression !== DEFLATE) return reject(Object.assign(new Error(`${entry.name} uses a compression a package does not.`), { code: 'badPackage' }));
+
+            const inflater = createInflateRaw();
+            let out = 0;
+            let done = false;
+
+            const finish = (error, value) => {
+                if (done) return;
+                done = true;
+                if (error) {
+                    inflater.destroy();
+                    reject(error);
+                } else {
+                    resolve(value);
+                }
+            };
+
+            inflater.on('data', (chunk) => {
+                out += chunk.length;
+                if (out > limit) {
+                    finish(Object.assign(new Error(`${entry.name} expands past the ${entry.size} bytes its package declares — ` +
+                        'a damaged or hostile package.'), { code: 'tooLarge' }));
+                }
+            });
+            inflater.on('error', (error) => finish(Object.assign(error, { code: 'badPackage' })));
+            inflater.on('end', () => finish(null, out));
+
+            // Fed in pieces, so a large entry is never read off a file whole.
+            const PIECE = 256 * 1024;
+            const feed = (from) => {
+                let offset = from;
+
+                while (!done && offset < entry.compressedSize) {
+                    const piece = source.read(dataAt + offset, Math.min(PIECE, entry.compressedSize - offset));
+                    if (!piece.length) break;
+
+                    offset += piece.length;
+
+                    // Full: carried on once the inflater has drained, so its output is counted as it goes.
+                    if (!inflater.write(piece)) return inflater.once('drain', () => feed(offset));
+                }
+
+                if (!done) inflater.end();
+                return undefined;
+            };
+
+            feed(0);
+        });
+
+        if (produced > limit) throw Object.assign(new Error(`${entry.name} is larger than its package declares.`), { code: 'tooLarge' });
+
+        total += produced;
+    }
+
+    return total;
+};
+
+module.exports = { verifySizes, read, names, expandedSize, fromBuffer, fromFile, centralEntries, boundedInflate, LOCAL_HEADER, MAX_ENTRY };

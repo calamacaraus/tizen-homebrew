@@ -28,7 +28,8 @@ const pairing = (state) => (state.restoring ? html`
     </div>
 
     <input class="field code-field mono" id="pin" type="tel" inputmode="numeric" maxlength="6"
-           autocomplete="off" placeholder="······" data-focus="pin" data-on-input="pin">
+           autocomplete="off" placeholder="······" data-focus="pin" data-on-input="pin"
+           aria-label="Six-digit code shown on the TV">
 
     ${state.pinError
         ? html`<div class="state state-fault">
@@ -108,6 +109,15 @@ const tabs = (state) => html`
               data-focus="tab:${id}" data-on-click="tab:${id}">${label}</button>`)}
   </div>`;
 
+// A destructive action takes two taps: the first turns the button into a question, which lapses after a few
+// seconds untouched. No dialog, which a TV-sized page and a phone both make clumsy.
+const confirmButton = (state, action, label, asking, extra = 'btn-quiet') => {
+    const asked = state.confirming === action;
+
+    return html`<button class="btn ${asked ? 'btn-warn' : extra}" data-focus="${action}"
+        data-on-click="${asked ? action : `confirm:${action}`}" aria-live="polite">${asked ? asking : label}</button>`;
+};
+
 const section = (label, body, footer = '') => html`
   <div class="glass pad stack stack-snug">
     <span class="label">${label}</span>
@@ -121,7 +131,7 @@ const catalogued = (app) => {
     const held = html`<span class="mono">${app.installed}</span>`;
 
     if (app.update) {
-        return html`<span class="small truncate">${held} → <span class="mono ink">${app.available || 'new build'}</span></span>`;
+        return html`<span class="small">${held} → <span class="mono ink">${app.available || 'new build'}</span></span>`;
     }
 
     if (app.rebuilt) return html`<span class="small truncate">${held} installed · a new build of it is out</span>`;
@@ -161,28 +171,32 @@ const originText = (app, state) => {
         .filter(Boolean).join(' · ');
 };
 
-const action = (app) => {
+// While one install runs every install button waits: a second tap would only be refused as busy.
+const action = (app, busy = false) => {
     if (app.unlisted) return '';
+
+    const off = busy ? 'disabled' : '';
 
     if (!app.installed) {
         return html`<button class="btn btn-ghost" data-focus="app:${app.id}"
-                       data-on-click="install:catalog:${app.id}">install</button>`;
+                       data-on-click="install:catalog:${app.id}" ${off}>install</button>`;
     }
 
     if (app.rebuilt) {
         return html`<button class="btn btn-ghost" data-focus="app:${app.id}"
-                       data-on-click="install:catalog:${app.id}">reinstall</button>`;
+                       data-on-click="install:catalog:${app.id}" ${off}>reinstall</button>`;
     }
 
     // Up to date: nothing to press, and the room goes to the name.
     if (!app.update) return '';
 
     return html`<button class="btn btn-signal"
-                   data-focus="app:${app.id}" data-on-click="install:catalog:${app.id}">update</button>`;
+                   data-focus="app:${app.id}" data-on-click="install:catalog:${app.id}" ${off}>update</button>`;
 };
 
-// A collection's entries are checked by asking for the collection, which "check all" does.
-const recheck = (app, checking) => (app.unlisted || app.source.type !== 'github' || app.collection ? '' : html`
+// A collection's app is checked by asking its repository again; one listed by URL has nothing to ask.
+// Not when an update is already known: the button would only say so again, and the room goes to the name.
+const recheck = (app, checking) => (app.unlisted || app.update || app.source.type !== 'github' || (app.collection && !app.installed) ? '' : html`
   <button class="btn btn-quiet" data-focus="check:${app.id}" data-on-click="check:${app.id}"
           ${checking ? 'disabled' : ''}>${checking === app.id ? 'checking…' : 'check'}</button>`);
 
@@ -202,18 +216,21 @@ const edit = (app) => (app.installed && app.packageId && !app.unlisted ? html`
 
 const row = (app, checking, customizations, state = null) => {
     const shown = dressed(app, customizations);
-    const below = state && app.installed
-        ? html`${catalogued(app)}<span class="micro mono wrap origin">${originText(app, state)}</span>`
-        : catalogued(app);
+    const searchable = [shown.name, app.name, app.description, app.source && app.source.ref, app.source && app.source.asset]
+        .filter(Boolean).join(' ').toLowerCase();
 
+    // The origin gets the row's whole width, under the name and buttons, rather than a column one word wide.
     return html`
-      <div class="row split">
-        ${identity(shown, below)}
-        <span class="controls">
-          ${edit(app)}
-          ${recheck(app, checking)}
-          ${action(app)}
-        </span>
+      <div class="row" data-search="${searchable}">
+        <div class="split">
+          ${identity(shown, catalogued(app))}
+          <span class="controls">
+            ${edit(app)}
+            ${recheck(app, checking)}
+            ${action(app, Boolean(state && state.phase))}
+          </span>
+        </div>
+        ${state && app.installed ? html`<span class="micro mono wrap origin">${originText(app, state)}</span>` : ''}
       </div>`;
 };
 
@@ -234,21 +251,21 @@ const customizer = (state) => {
             <span class="mono micro truncate">${state.customIcon ? 'new icon chosen' : custom.icon ? 'your icon' : 'the app’s own icon'}</span>`, true)}
         </div>
 
-        <input class="field" id="cname" placeholder="${app.name}" value="${state.customDraft.name}"
+        <input class="field" id="cname" aria-label="Name on the TV" placeholder="${app.name}" value="${state.customDraft.name}"
                data-focus="cname" data-on-input="cname" maxlength="60" autocapitalize="words" spellcheck="false">
+
+        <input id="cicon" class="visually-hidden" type="file" accept="image/png,image/jpeg" data-on-change="customIcon">
 
         <label for="cicon" class="drop">
           <span class="mono small">choose an icon</span>
           <span class="micro mono">PNG or JPEG · fitted to 512×512</span>
-        </label>
-        <input id="cicon" type="file" accept="image/png,image/jpeg" hidden data-on-change="customIcon">`,
+        </label>`,
     html`<span class="controls">
         <button class="btn btn-signal" data-focus="custom:apply" data-on-click="custom:apply"
                 ${state.customBusy ? 'disabled' : ''}>save &amp; reinstall</button>
         <button class="btn btn-ghost" data-focus="custom:save" data-on-click="custom:save"
                 ${state.customBusy ? 'disabled' : ''}>save</button>
-        ${state.customizations[packageId] ? html`<button class="btn btn-quiet" data-focus="custom:reset"
-                data-on-click="custom:reset">reset</button>` : ''}
+        ${state.customizations[packageId] ? confirmButton(state, 'custom:reset', 'reset', 'tap again to reset') : ''}
         <button class="btn btn-quiet" data-focus="custom:close" data-on-click="custom:close">close</button>
       </span>`);
 };
@@ -372,11 +389,17 @@ const catalog = (state) => {
         ? html`${groups.map((group) => html`
             <div class="stack stack-tight">
               <span class="micro mono">${group.repository.name} · ${group.apps.length}</span>
-              <div class="list">${group.apps.map((app) => row(app, state.checking, state.customizations))}</div>
+              <div class="list">${group.apps.map((app) => row(app, state.checking, state.customizations, state))}</div>
             </div>`)}`
         : html`<p class="small">Everything listed is installed.</p>`;
 
+    // Filtered as you type by the page itself (main.js), so typing never redraws the list or loses the field.
+    const filter = html`<input class="field filter" id="filter" type="search" aria-label="Filter apps by name"
+        placeholder="filter ${state.catalog.length + (state.others || []).length} apps" data-focus="filter" data-on-input="filter"
+        autocapitalize="off" autocorrect="off" spellcheck="false">`;
+
     return html`${customizer(state)}${run(state)}
+      ${filter}
       ${section(`On this TV · ${installed.length}`, html`${toolbar}${onTv}`)}
       ${section('Available to install', available)}`;
 };
@@ -396,7 +419,7 @@ const when = (iso) => {
     return `${Math.round(minutes / 1440)} days ago`;
 };
 
-const repoRow = (repository) => html`
+const repoRow = (state) => (repository) => html`
   <div class="row split">
     <span class="stack stack-tight">
       <span class="inline">
@@ -410,8 +433,7 @@ const repoRow = (repository) => html`
           : ''}</span>
     </span>
     <span class="controls">
-      ${repository.builtIn ? '' : html`<button class="btn btn-quiet" data-focus="unrepo:${repository.id}"
-          data-on-click="unrepo:${repository.id}">remove</button>`}
+      ${repository.builtIn ? '' : confirmButton(state, `unrepo:${repository.id}`, 'remove', 'tap again to remove')}
     </span>
   </div>`;
 
@@ -424,23 +446,24 @@ const repos = (state) => {
         <p class="small">Add a GitHub <span class="mono ink">owner/repo</span> whose newest release holds the apps — a
           collection like <span class="mono ink">example/tv-packages</span> — or an https link to a
           catalog.json. Its apps appear under apps.</p>
-        <div class="list">${state.repositories.map(repoRow)}</div>
+        <div class="list">${state.repositories.map(repoRow(state))}</div>
         <div class="entry">
-          <input class="field" id="repo" placeholder="owner/repo or https://…/catalog.json"
+          <input class="field" id="repo" aria-label="Repository to add" placeholder="owner/repo or https://…/catalog.json"
                  data-focus="repo" data-on-enter="repo:add"
                  autocapitalize="off" autocorrect="off" spellcheck="false">
           <button class="btn" data-focus="repo:go" data-on-click="repo:add"
                   ${state.repoBusy ? 'disabled' : ''}>${state.repoBusy ? 'adding…' : 'add'}</button>
         </div>`)}
       ${section('Automatic updates', html`
-        <div class="list">
+        <fieldset class="list plain">
+          <legend class="visually-hidden">Automatic updates</legend>
           ${MODES.map(([value, label, hint]) => html`
             <label class="toggle">
               <input type="radio" name="auto" data-focus="auto:${value}" data-on-change="auto:${value}"
                      ${mode === value ? 'checked' : ''}>
               <span class="stack stack-tight"><span class="small ink">${label}</span><span class="micro">${hint}</span></span>
             </label>`)}
-        </div>
+        </fieldset>
         <span class="micro mono">last looked ${when(state.settings && state.settings.lastCheck)}${last && last.updated && last.updated.length
             ? ` · updated ${last.updated.join(', ')}` : ''}${last && last.available && last.available.length
             ? ` · newer: ${last.available.join(', ')}` : ''}</span>`)}`;
@@ -469,8 +492,8 @@ const chosen = (state) => {
 const upload = (state) => section('Upload a package', html`
     <p class="small">Send a .wgt straight from this device. Nothing needs hosting.</p>
 
+    <input id="file" class="visually-hidden" type="file" accept=".wgt,.tpk" data-on-change="file">
     <label for="file" class="drop${state.file ? ' drop-filled' : ''}">${chosen(state)}</label>
-    <input id="file" type="file" accept=".wgt,.tpk" hidden data-on-change="file">
 
     ${state.uploading !== null ? html`<div class="meter"><i style="width:${state.uploading}%"></i></div>` : ''}`,
     state.file
@@ -478,12 +501,12 @@ const upload = (state) => section('Upload a package', html`
                        ${state.uploading !== null ? 'disabled' : ''}>install</button>`
         : '');
 
-const remoteSource = ({ label, id, placeholder, action, hint, value }) => section(label, html`
+const remoteSource = ({ label, id, placeholder, action, hint, value, busy = false }) => section(label, html`
     <div class="entry">
-      <input class="field" id="${id}" placeholder="${placeholder}" value="${value || ''}"
+      <input class="field" id="${id}" aria-label="${label}" placeholder="${placeholder}" value="${value || ''}"
              data-focus="${id}" data-on-enter="${action}"
              autocapitalize="off" autocorrect="off" spellcheck="false">
-      <button class="btn" data-focus="${id}:go" data-on-click="${action}">install</button>
+      <button class="btn" data-focus="${id}:go" data-on-click="${action}" ${busy ? 'disabled' : ''}>install</button>
     </div>
     <p class="small">${hint}</p>`);
 
@@ -535,7 +558,7 @@ const fromGitHub = (state) => section('GitHub release', html`
 
 const fromUrl = (state) => remoteSource({
     label: 'Direct URL', id: 'url', placeholder: 'https://…/App.wgt', action: 'install:url',
-    hint: 'Must be https.', value: state.url
+    hint: 'Must be https.', value: state.url, busy: Boolean(state.phase)
 });
 
 const usb = (state) => section('Attached storage', html`
@@ -577,7 +600,7 @@ const relay = (state) => section('Command relay', html`
 
     ${state.relayEnabled ? html`
       <div class="entry">
-        <input class="field" id="cmd" placeholder="pkgcmd -l" data-focus="cmd"
+        <input class="field" id="cmd" aria-label="Command to run on the TV" placeholder="pkgcmd -l" data-focus="cmd"
                data-on-enter="relay:run" autocapitalize="off" autocorrect="off" spellcheck="false">
         <button class="btn" data-focus="cmd:go" data-on-click="relay:run"
                 ${state.relayBusy ? 'disabled' : ''}>run</button>
@@ -623,11 +646,14 @@ const outcome = (state) => {
         // What went wrong, what the television said, and what to do about it — the last absent when nothing
         // has a cure.
         return html`
-          <div class="state state-fault">
+          <div class="state state-fault" role="alert">
             <span class="state-head">Failed</span>
             <span class="small ink">${state.error.title}</span>
             <span class="mono micro wrap">${state.error.detail}</span>
             ${state.error.remedy ? html`<span class="small wrap">${state.error.remedy}</span>` : html``}
+            ${state.error.confirmable ? html`<span class="controls">
+              ${confirmButton(state, 'install:anyway', 'replace it anyway', 'tap again to replace it', 'btn-warn')}
+            </span>` : html``}
           </div>`;
     }
 

@@ -38,4 +38,42 @@ const allowedHost = (header) => {
         extra.indexOf(name) !== -1;
 };
 
-module.exports = { allowedHost, hostnameOf };
+const LOOPBACK = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
+
+const isLoopback = (address) => LOOPBACK.indexOf(String(address || '')) !== -1;
+
+// Origins a developer serves the phone page from, by hand, for a build being worked on. Nothing else
+// on localhost is believed: any other app's local web server on the TV would be.
+const DEV_ORIGINS = String(process.env.HOMEBREW_DEV_ORIGINS || '')
+    .split(',').map((origin) => origin.trim().toLowerCase()).filter(Boolean);
+
+// Who may be trusted without the PIN: a caller sending no Origin (the service's own tools — a browser
+// page that sends none cannot read the answer), a packaged app's page (a real non-http scheme, file://
+// on the television), or this service's own page. Not "null" — a sandboxed frame or a data: page in the
+// TV's browser sends that, and would otherwise be handed the PIN — and not any other web page: the TV's
+// browser reaches 127.0.0.1 too.
+const trustedOrigin = (origin, hostHeader) => {
+    if (!origin) return true;
+
+    const typed = String(origin).trim().toLowerCase();
+    if (typed === 'null') return false;
+    if (DEV_ORIGINS.indexOf(typed) !== -1) return true;
+
+    let parsed = null;
+
+    try {
+        parsed = new URL(origin);
+    } catch (e) {
+        return false;
+    }
+
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return parsed.protocol !== 'data:' && parsed.protocol !== 'blob:';
+
+    return parsed.host.toLowerCase() === String(hostHeader || '').toLowerCase();
+};
+
+// The loopback trust every PIN-less route and the socket greeting rely on.
+const trustedLocal = (request) => Boolean(request && request.socket && isLoopback(request.socket.remoteAddress) &&
+    trustedOrigin(request.headers && request.headers.origin, request.headers && request.headers.host));
+
+module.exports = { allowedHost, hostnameOf, isLoopback, trustedOrigin, trustedLocal };

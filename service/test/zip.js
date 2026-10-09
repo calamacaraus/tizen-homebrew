@@ -126,6 +126,32 @@ const attempt = (fn) => {
     check('and so is nothing at all', empty.value === null, empty.error && empty.error.message);
 }
 
+(async () => {
+    {
+        // A package whose directory says 100 bytes for an entry that inflates to 8MB of zeros.
+        const lying = fixture.zipAll([
+            { name: 'config.xml', contents: require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'config.xml')), deflate: true },
+            { name: 'blob.bin', contents: Buffer.alloc(8 * 1024 * 1024), deflate: true }
+        ]);
+        const central = lying.lastIndexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+        lying.writeUInt32LE(100, central + 24);
+
+        const caught = await zip.verifySizes(zip.fromBuffer(lying), 512 * 1024 * 1024).then(() => null, (error) => error.code);
+        check('an entry that inflates past what its package declares is caught before anything inflates it whole',
+            caught === 'tooLarge', String(caught));
+
+        const honest = fixture.wgtWithIcon();
+        const total = await zip.verifySizes(zip.fromBuffer(honest), 512 * 1024 * 1024);
+        check('and an honest package passes, counted to the byte', total === zip.expandedSize(zip.fromBuffer(honest)), String(total));
+
+        const budget = await zip.verifySizes(zip.fromBuffer(honest), 10).then(() => null, (error) => error.code);
+        check('as does anything past the budget for the whole package', budget === 'tooLarge', String(budget));
+    }
+
 const failed = results.filter((ok) => !ok).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed.`);
 process.exit(failed ? 1 : 0);
+})().catch((error) => {
+    console.error('\nHarness error:', error.stack);
+    process.exit(1);
+});

@@ -42,12 +42,18 @@ const describe = async (id, root) => {
     return { version: null, name: null };
 };
 
+// Turned off after the platform failed to answer, and tried again after a while: one slow answer at a bad
+// moment should not cost names and icons for the weeks the service runs.
 let naming = true;
+let namingOffAt = 0;
+const NAMING_RETRY = 10 * 60 * 1000;
 
 let reported = false;
 
 const named = (say) => new Promise((resolve) => {
     const api = platform();
+
+    if (!naming && Date.now() - namingOffAt > NAMING_RETRY) naming = true;
 
     if (!naming || !api || !api.application || typeof api.application.getAppsInfo !== 'function') {
         return resolve(new Map());
@@ -61,6 +67,7 @@ const named = (say) => new Promise((resolve) => {
         clearTimeout(timer);
         if (note) {
             naming = false;
+            namingOffAt = Date.now();
             if (say) say.info(`tizen.application.getAppsInfo ${note} — falling back to manifests`);
         }
         resolve(value);
@@ -68,12 +75,23 @@ const named = (say) => new Promise((resolve) => {
 
     const timer = setTimeout(() => give(new Map(), `did not answer in ${NAMING_DEADLINE}ms`), NAMING_DEADLINE);
 
+    // A package can hold several apps — the one on the home row and a background service — and only the
+    // first has the package's own name and icon; a service is given the platform's default icon. So the one
+    // the home row shows answers for the package, whichever order the platform lists them in.
+    const shown = (app) => app.show !== false && !/service/i.test(String(app.id || '').split('.').pop());
+
     const collapse = (apps) => (apps || []).reduce((byPackage, app) => {
         const id = app && (app.packageId || app.id);
-        const held = id ? byPackage.get(id) : null;
+        if (!id) return byPackage;
 
-        if (id && !(held && held.version)) {
-            byPackage.set(id, { name: app.name || null, version: app.version || null, iconPath: app.iconPath || null });
+        const held = byPackage.get(id);
+        const candidate = { name: app.name || null, version: app.version || null, iconPath: app.iconPath || null, shown: shown(app) };
+
+        if (!held || (candidate.shown && !held.shown) || (candidate.shown === held.shown && !held.version && candidate.version)) {
+            // A version is a version whichever app of the package said it.
+            byPackage.set(id, { ...candidate, version: candidate.version || (held && held.version) || null });
+        } else if (!held.version && candidate.version) {
+            byPackage.set(id, { ...held, version: candidate.version });
         }
 
         return byPackage;

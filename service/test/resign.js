@@ -70,6 +70,18 @@ const run = async () => {
         check('its contents survive', names.indexOf('config.xml') !== -1, names.join(', '));
         check('and only its contents were digested', files === 1, `digested ${files} files`);
         check('the device comes back with the signed package', device === 'TESTSET1234', String(device));
+
+        // Written straight to a file instead: the same package, hashed as it was written.
+        const { mkdtempSync, readFileSync } = require('fs');
+        const target = require('path').join(mkdtempSync(require('path').join(require('os').tmpdir(), 'signed-')), 'out', 'p.wgt');
+        const written = await resign(fixture.wgt(), pair, { toFile: target });
+        const onDisk = readFileSync(target);
+        const fileNames = await namesInside(onDisk);
+
+        check('signed to a file, the package is the same and its hash is of what is on disk',
+            written.archive === null && written.size === onDisk.length && fileNames.join() === names.join() &&
+            written.sha256 === require('crypto').createHash('sha256').update(onDisk).digest('hex'),
+            JSON.stringify({ size: written.size, names: fileNames }));
     }
 
     {

@@ -1,6 +1,6 @@
 'use strict';
 
-const { writeFileSync, mkdirSync, openSync, readSync, closeSync, readdirSync, unlinkSync, statSync } = require('fs');
+const { mkdirSync, readdirSync, unlinkSync, statSync, createReadStream, promises } = require('fs');
 const { createHash, randomBytes } = require('crypto');
 
 const { interpret, settled } = require('./verdicts.js');
@@ -15,34 +15,55 @@ const problem = (code, message) => Object.assign(new Error(message), { code });
 // is read back and hashed before it is installed: the bytes installed are the bytes that were signed.
 const OURS = /^homebrew-[0-9a-f]{16}\.(wgt|tpk)$/;
 
-const digest = (buffer) => createHash('sha256').update(buffer).digest('hex');
-
-// Read back in pieces, so checking a large package does not hold a second copy of it in memory.
-const digestOfFile = (path) => {
+// Hashed 4MB at a time with a turn of the event loop between, so a large package does not stop the service
+// answering the phone while it is checked.
+const digest = async (buffer) => {
     const hash = createHash('sha256');
-    const chunk = Buffer.alloc(256 * 1024);
-    const handle = openSync(path, 'r');
+    const PIECE = 4 * 1024 * 1024;
 
-    try {
-        for (let got = readSync(handle, chunk, 0, chunk.length, null); got > 0; got = readSync(handle, chunk, 0, chunk.length, null)) {
-            hash.update(chunk.slice(0, got));
-        }
-    } finally {
-        closeSync(handle);
+    for (let at = 0; at < buffer.length; at += PIECE) {
+        hash.update(buffer.slice(at, at + PIECE));
+        if (at + PIECE < buffer.length) await new Promise((resolve) => setTimeout(resolve, 0));
     }
 
     return hash.digest('hex');
 };
 
-const stage = (archive, { isWgt }, dir = STAGING_DIR) => {
+// Read back in pieces, so checking a large package does not hold a second copy of it in memory, and
+// asynchronously, so the service keeps answering while a large one is checked.
+const digestOfFile = (path) => new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(path, { highWaterMark: 256 * 1024 });
+
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+});
+
+// A staging path of its own, for the signer to write into directly.
+// Only a name: the signer creates the directory and the file when it writes.
+const reserve = ({ isWgt }, dir = STAGING_DIR) => `${dir}/homebrew-${randomBytes(8).toString('hex')}.${isWgt ? 'wgt' : 'tpk'}`;
+
+// What the signer wrote, read back off the flash and held to the hash it computed as it wrote.
+const verifyStaged = async (path, sha256) => {
+    if (await digestOfFile(path) !== sha256) {
+        unstage(path);
+        throw problem('internal', 'The staged package does not match what was signed; it was removed and not installed.');
+    }
+    return path;
+};
+
+const stage = async (archive, { isWgt }, dir = STAGING_DIR) => {
     const path = `${dir}/homebrew-${randomBytes(8).toString('hex')}.${isWgt ? 'wgt' : 'tpk'}`;
+    const expected = await digest(archive);
 
     mkdirSync(dir, { recursive: true });
+
     // Created new, never written through an existing file. Readable as any staged package is: the TV's own
     // installer reads it, possibly as another user, and a signed package holds nothing secret.
-    writeFileSync(path, archive, { flag: 'wx' });
+    await promises.writeFile(path, archive, { flag: 'wx' });
 
-    if (digestOfFile(path) !== digest(archive)) {
+    if (await digestOfFile(path) !== expected) {
         unstage(path);
         throw problem('internal', 'The staged package does not match what was signed; it was removed and not installed.');
     }
@@ -58,7 +79,8 @@ const unstage = (path) => {
         unlinkSync(path);
         return true;
     } catch (e) {
-        return false;
+        // Never written (the signer failed before it began) is as removed as can be.
+        return e.code === 'ENOENT';
     }
 };
 
@@ -96,4 +118,4 @@ const run = (session, path, packageId) =>
         until: settled
     }).then((output) => interpret(output, { packageId }));
 
-module.exports = { stage, unstage, sweep, run, digestOfFile, STAGING_DIR, LEFT_BEHIND };
+module.exports = { reserve, verifyStaged, digest, stage, unstage, sweep, run, digestOfFile, STAGING_DIR, LEFT_BEHIND };
