@@ -16,7 +16,7 @@ mkdirSync(join(appsRoot, 'readable/res/wgt'), { recursive: true });
 writeFileSync(join(appsRoot, 'readable/res/wgt/config.xml'),
     '<widget version="1.2.3"><name>Readable</name></widget>');
 
-['silent1', 'silent2', 'silent3'].forEach((id) => mkdirSync(join(appsRoot, id), { recursive: true }));
+['silent1', 'silent2', 'silent3', 'CharlieTV1'].forEach((id) => mkdirSync(join(appsRoot, id), { recursive: true }));
 mkdirSync(join(appsRoot, '.recovery'), { recursive: true });
 
 const load = () => {
@@ -38,7 +38,12 @@ const APPS = [
     { id: 'readable.App', packageId: 'readable', name: 'Readable', version: '1.2.3' },
     { id: 'silent1.App', packageId: 'silent1', name: 'First', version: '0.9.0' },
     { id: 'silent2.Service', packageId: 'silent2', name: 'Second Service', version: null },
-    { id: 'silent2.App', packageId: 'silent2', name: 'Second', version: '4.0.1' }
+    { id: 'silent2.App', packageId: 'silent2', name: 'Second', version: '4.0.1' },
+    // As Charlie lists: its background service first, versioned too, with the platform's default icon.
+    { id: 'CharlieTV1.service', packageId: 'CharlieTV1', name: 'charlie_service', version: '1.17.2', show: false,
+        iconPath: '/opt/share/icons/default/small/default.png' },
+    { id: 'CharlieTV1.CharlieWasm', packageId: 'CharlieTV1', name: 'Charlie', version: '1.17.2', show: true,
+        iconPath: '/opt/usr/apps/CharlieTV1/shared/res/CharlieTV1.png' }
 ];
 
 const main = async () => {
@@ -47,7 +52,7 @@ const main = async () => {
         const found = byId(list);
 
         check('every directory is a row, dotfiles excluded',
-            list.length === 4 && !found['.recovery'], `${list.length}: ${Object.keys(found)}`);
+            list.length === 5 && !found['.recovery'], `${list.length}: ${Object.keys(found)}`);
 
         check('the platform supplies a version the manifest could not',
             found.silent1.version === '0.9.0' && found.silent1.name === 'First',
@@ -55,6 +60,9 @@ const main = async () => {
 
         check('one package, several applications: the versioned one wins',
             found.silent2.version === '4.0.1', JSON.stringify(found.silent2));
+
+        check('a package whose service is listed first answers with the home-row app\'s name and icon',
+            found.CharlieTV1.name === 'Charlie' && /CharlieTV1\.png$/.test(found.CharlieTV1.iconPath || ''), JSON.stringify(found.CharlieTV1));
 
         check('a package the platform did not name still lists, with no version',
             found.silent3.version === null && found.silent3.name === 'silent3',
@@ -68,7 +76,7 @@ const main = async () => {
         const list = await packages.list({ appsRoot });
 
         check('a short answer from the platform does not lose rows',
-            list.length === 4, `${list.length} rows`);
+            list.length === 5, `${list.length} rows`);
 
         check('the packages it left out fall back to their manifests',
             byId(list).readable.version === '1.2.3' && byId(list).silent1.version === null,
@@ -79,13 +87,13 @@ const main = async () => {
         const list = await packages.list({ appsRoot });
 
         check('a refusal falls back to the disk alone',
-            list.length === 4 && byId(list).readable.version === '1.2.3', `${list.length} rows`);
+            list.length === 5 && byId(list).readable.version === '1.2.3', `${list.length} rows`);
     });
 
     await withTizen(() => { throw new Error('threw synchronously'); }, async (packages) => {
         const list = await packages.list({ appsRoot });
 
-        check('a throwing device api is caught, not propagated', list.length === 4, `${list.length} rows`);
+        check('a throwing device api is caught, not propagated', list.length === 5, `${list.length} rows`);
     });
 
     await withTizen(() => {}, async (packages) => {
@@ -97,7 +105,7 @@ const main = async () => {
         const elapsed = Date.now() - started;
 
         check('a silent device api gives up on its deadline',
-            list.length === 4 && elapsed >= packages.NAMING_DEADLINE && elapsed < packages.NAMING_DEADLINE + 2000,
+            list.length === 5 && elapsed >= packages.NAMING_DEADLINE && elapsed < packages.NAMING_DEADLINE + 2000,
             `${list.length} rows in ${elapsed}ms`);
 
         check('and says so once, naming the call',

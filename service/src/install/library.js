@@ -103,8 +103,12 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
 
         if (!Array.isArray(listed)) throw new Error('That URL did not answer with a catalog (a list of apps).');
 
+        // A package id it states is not believed: one naming an app already installed — Tizen Homebrew's own,
+        // say — would have its "update" offered and installed over that app. As with a collection, the id is
+        // learned from what the entry's own install turns out to be.
         return listed.map(usable).filter(Boolean).map((entry) => ({
             ...entry,
+            packageId: null,
             id: `${repository.id}.${entry.id}`,
             repository: repository.id
         }));
@@ -112,10 +116,15 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
 
     const fromCollection = async (repository) => collection.expand(repository, await latestRelease(repository.ref));
 
-    const load = async (repository, refresh) => {
+    const load = async (repository, refresh, single = false) => {
         const cached = readCache(repository);
 
-        if (!refresh && cached && cached.age < CACHE_TTL) {
+        // One app's check pressed again within a minute: the answer just fetched stands (see updates.js on
+        // GitHub's limit). Check all and the daily check always ask.
+        const recent = single && status[repository.id] && !status[repository.id].error &&
+            Date.now() - status[repository.id].at < 60 * 1000;
+
+        if ((!refresh || recent) && cached && (recent || cached.age < CACHE_TTL)) {
             return { entries: cached.entries, stale: false };
         }
 
@@ -159,8 +168,9 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
     const fetch = async ({ refresh = false } = {}) => {
         const kept = repositories();
         const everything = refresh === true;
+        const one = refresh && typeof refresh === 'object';
 
-        const base = await official.fetch({ refresh: everything }).then(
+        const base = await official.fetch({ refresh: everything || Boolean(one && refresh.repository === OFFICIAL) }).then(
             (result) => result,
             (error) => {
                 // With nothing else to show, a dead origin is still the failure it always was.
@@ -171,8 +181,10 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
         const loaded = [];
 
         for (const repository of kept) {
-            const fresh = everything || (refresh === 'collections' && repository.kind === 'github');
-            loaded.push({ repository, result: await load(repository, fresh) });
+            // `{ repository: id }` asks one repository again — the check button on one of its apps.
+            const fresh = everything || (refresh === 'collections' && repository.kind === 'github') ||
+                (refresh && typeof refresh === 'object' && refresh.repository === repository.id);
+            loaded.push({ repository, result: await load(repository, fresh, Boolean(one)) });
         }
 
         const entries = base.entries.map((entry) => ({ ...entry, repository: OFFICIAL }))

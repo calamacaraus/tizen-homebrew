@@ -9,7 +9,7 @@ const Inbound = {
     WATCH: 'watch',                 // { logsSince? } — push the log and the device state as they change
     GET_CATALOG: 'getCatalog',      // { refresh? }
     CHECK_UPDATES: 'checkUpdates',  // { id? }
-    INSTALL: 'install',             // { source: 'catalog'|'github'|'url'|'file', ref, asset? } — asset: an exact release file name
+    INSTALL: 'install',             // { source: 'catalog'|'github'|'url'|'file', ref, asset?, confirm? } — asset: an exact release file name; confirm: replace an app installed from elsewhere
     UPDATE_ALL: 'updateAll',        // { includeRebuilt? } — install every app with an update, one after another
     LIST_RELEASE: 'listRelease',    // { ref: 'owner/repo' } — every package file in its newest release
     GET_REPOSITORIES: 'getRepositories', // -
@@ -82,7 +82,9 @@ const ErrorCode = {
     CHECKSUM_MISMATCH: 'checksumMismatch',
     TOO_LARGE: 'tooLarge',
     BUSY: 'busy',
-    SAVED_NOT_APPLIED: 'savedNotApplied'
+    SAVED_NOT_APPLIED: 'savedNotApplied',
+    REPLACES_OTHER: 'replacesOther',
+    PACKAGE_MISMATCH: 'packageMismatch'
 };
 
 function ProtocolError(code, message) {
@@ -121,6 +123,12 @@ function parse(raw) {
         throw ProtocolError(ErrorCode.BAD_MESSAGE, `Unknown message type: ${msg.type}`);
     }
 
+    // A payload is an object or nothing: a string or a number would make every `'x' in payload` below throw.
+    if (msg.payload !== undefined && msg.payload !== null &&
+        (typeof msg.payload !== 'object' || Array.isArray(msg.payload))) {
+        throw ProtocolError(ErrorCode.BAD_MESSAGE, 'A message payload is an object.');
+    }
+
     const payload = msg.payload || {};
 
     if (msg.type === Inbound.INSTALL) {
@@ -132,6 +140,12 @@ function parse(raw) {
         }
         if ('asset' in payload && payload.asset !== null && !shortString(payload.asset)) {
             throw ProtocolError(ErrorCode.BAD_MESSAGE, 'An asset is the exact name of one release file.');
+        }
+        if ('expect' in payload && payload.expect !== null && !shortString(payload.expect)) {
+            throw ProtocolError(ErrorCode.BAD_MESSAGE, 'expect is a package id.');
+        }
+        if ('confirm' in payload && typeof payload.confirm !== 'boolean') {
+            throw ProtocolError(ErrorCode.BAD_MESSAGE, 'confirm is true or false.');
         }
         if ('asset' in payload && payload.asset !== null && payload.source !== 'github') {
             throw ProtocolError(ErrorCode.BAD_MESSAGE, 'Only a GitHub install picks a release file.');

@@ -288,7 +288,8 @@ store.subscribe(() => {
     if (settling) fit(); else remeasure();
 });
 
-keys.focus('restart');
+// The first thing OK presses: never the button that restarts the service.
+keys.focus('apps');
 
 window.addEventListener('resize', remeasure);
 

@@ -160,7 +160,13 @@ const run = async () => {
             JSON.stringify(of(list, 'tube')));
 
         await updates.check(CATALOG, { id: 'homebrew' });
-        check('and pressing it again asks again', github.asked.length === 2, github.asked.join(', '));
+        check('pressing it again within a minute spends nothing more', github.asked.length === 1, github.asked.join(', '));
+
+        const realNow = Date.now;
+        Date.now = () => realNow() + 61 * 1000;
+        await updates.check(CATALOG, { id: 'homebrew' });
+        Date.now = realNow;
+        check('and pressing it again after that asks again', github.asked.length === 2, github.asked.join(', '));
     }
 
     {

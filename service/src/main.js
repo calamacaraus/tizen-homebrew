@@ -1,7 +1,7 @@
 'use strict';
 
 const { createServer } = require('http');
-const { readFileSync, existsSync } = require('fs');
+const { existsSync } = require('fs');
 const { join, extname, normalize, sep } = require('path');
 const { homedir } = require('os');
 
@@ -16,7 +16,7 @@ const log = recorded.log;
 
 const { createStore } = require('./state.js');
 const { createRouter } = require('./http/router.js');
-const { json, failure, bytes, readBody } = require('./http/respond.js');
+const { json, failure, readBody } = require('./http/respond.js');
 const pin = require('./auth/pin.js');
 const device = require('./tv/device.js');
 const sdb = require('./tv/sdb.js');
@@ -42,6 +42,10 @@ const ORIGIN = '__HOMEBREW_ORIGIN__';
 const DEVELOPER = globalThis.__HOMEBREW_DEV__ === true;
 
 const start = () => {
+    // Tizen can load the service into a process it already runs: a second start would add a second set of
+    // timers and a second server, so the first one's answer is given again.
+    if (process.__homebrewStarted) return process.__homebrewStarted;
+
     const startedAt = new Date().toISOString();
     const secret = DEVELOPER ? pin.DEVELOPER_PIN : config.pairingPin();
 
@@ -61,8 +65,9 @@ const start = () => {
         log.on(Facility.AUTH).warn(`DEVELOPER BUILD — pin fixed at ${secret}, and POST /dev/eval will run ` +
             'anything this network sends it. Do not leave this on a television you care about.');
     } else {
-        log.on(Facility.AUTH).info(`pairing pin ${secret} — kept across restarts, so a reboot does not ` +
-            'unpair every phone');
+        // Not the code itself: the log is read by every paired phone, and the TV screen shows the code.
+        log.on(Facility.AUTH).info('pairing pin ready, shown on the TV screen — kept across restarts, so a reboot ' +
+            'does not unpair every phone');
     }
 
     const adopted = config.adoptHandoff();
@@ -78,7 +83,6 @@ const start = () => {
         installing: false,
         catalog: [],
         catalogStale: false,
-        lockout: pin.fresh(),
         device: null,
         updateRun: null
     });
@@ -94,7 +98,20 @@ const start = () => {
 
     // No prime() at startup: priming getPackagesInfo wedges the service on Tizen 9.0.
     // Every installed app's icon, for the phone's list.
-    const appIcons = createAppIcons({ dir: join(config.CONFIG_DIR, 'homebrewAppIcons'), log });
+    if (!config.read().iconKey) config.update({ iconKey: require('crypto').randomBytes(16).toString('hex') });
+
+    const appIconsDir = join(config.CONFIG_DIR, 'homebrewAppIcons');
+
+    // Icons kept before 0.3.9 could be a background service's default icon rather than the app's: forgotten
+    // once, and learned again from the TV or the next install.
+    if (config.read().appIconsVersion !== 2) {
+        try {
+            require('fs').readdirSync(appIconsDir).forEach((name) => require('fs').unlinkSync(join(appIconsDir, name)));
+        } catch (e) { /* none */ }
+        config.update({ appIconsVersion: 2 });
+    }
+
+    const appIcons = createAppIcons({ dir: appIconsDir, log, key: config.read().iconKey });
 
     const updates = createUpdates({ packages, log, config, appIcons });
 
@@ -113,10 +130,11 @@ const start = () => {
     const resigner = async () => {
         const { resign } = require('./install/resign.js');
 
-        return (archive) => resign(archive, config.read());
+        return (given, options) => resign(given, config.read(), options);
     };
 
-    const installer = createInstaller({ sdb, device, config, resigner, store, log, appIcons });
+    const installer = createInstaller({ sdb, device, config, resigner, store, log, appIcons,
+        isInstalled: (packageId) => updates.isInstalled(packageId) });
 
     // Filled in once the socket server is up, at the end of this function. The device sweep and the
     // auto-updater are the only things that learn something without being asked, so they push.
@@ -192,25 +210,35 @@ const start = () => {
     refreshDevice();
     if (device.onTv) setInterval(refreshDevice, 15000);
 
-    const fromLoopback = (request) => {
-        const address = (request.socket && request.socket.remoteAddress) || '';
-        return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address);
-    };
+    // Loopback and not a web page from elsewhere: see hosts.js.
+    const fromLoopback = (request) => require('./http/hosts.js').trustedLocal(request);
 
-    const authorise = (presented) => {
-        const lockout = store.select('lockout');
+    const guard = pin.createGuard();
 
-        if (pin.isLocked(lockout)) {
-            const seconds = Math.ceil(pin.remaining(lockout) / 1000);
+    // `request` is the HTTP request or the socket's upgrade request: who is asking decides whose failures count.
+    const authorise = (presented, request) => {
+        const address = (request && request.socket && request.socket.remoteAddress) || 'unknown';
+        const headers = (request && request.headers) || {};
+
+        // A web page that is not this service's own cannot be the phone, so what it sends is not a guess to
+        // count: otherwise any page a phone or the TV has open could lock that device out by sending five.
+        if (headers.origin && !require('./http/hosts.js').trustedOrigin(headers.origin, headers.host)) {
+            return { ok: false, code: ErrorCode.UNAUTHORIZED, message: 'Not from this TV\'s own page.' };
+        }
+
+        const state = guard.check(address, fromLoopback(request));
+
+        if (state.locked) {
+            const seconds = Math.ceil(state.remaining / 1000);
             return { ok: false, code: ErrorCode.LOCKED_OUT, message: `Too many incorrect PINs. Try again in ${seconds}s.` };
         }
 
         if (!pin.matches(presented, secret)) {
-            store.update({ lockout: pin.recordFailure(lockout) });
+            guard.failed(address);
             return { ok: false, code: ErrorCode.UNAUTHORIZED, message: 'Wrong or missing PIN.' };
         }
 
-        store.update({ lockout: pin.recordSuccess() });
+        guard.succeeded(address);
         return { ok: true };
     };
 
@@ -286,7 +314,7 @@ const start = () => {
     const authorisedRead = (request, response, handle) => {
         if (fromLoopback(request)) return handle();
 
-        const verdict = authorise(request.headers['x-homebrew-pin']);
+        const verdict = authorise(request.headers['x-homebrew-pin'], request);
         if (!verdict.ok) return failure(response, 403, verdict.code, verdict.message);
 
         return handle();
@@ -311,7 +339,7 @@ const start = () => {
         });
 
         const gate = (request, response) => {
-            const verdict = authorise(request.headers['x-homebrew-pin']);
+            const verdict = authorise(request.headers['x-homebrew-pin'], request);
             if (verdict.ok) return true;
             failure(response, verdict.code === ErrorCode.LOCKED_OUT ? 429 : 403, verdict.code, verdict.message);
             return false;
@@ -340,23 +368,46 @@ const start = () => {
         });
     }
 
+    let uploading = false;
+
     router.on.post('/install', async (request, response) => {
-        const verdict = authorise(request.headers['x-homebrew-pin']);
+        const verdict = authorise(request.headers['x-homebrew-pin'], request);
         if (!verdict.ok) return failure(response, verdict.code === ErrorCode.LOCKED_OUT ? 429 : 403, verdict.code, verdict.message);
+
+        // Refused before the body is read: a second upload while one installs, or is still arriving, would
+        // hold a second package.
+        if (store.select('installing') || uploading) {
+            request.resume();
+            return failure(response, 409, 'busy', 'An install is already running.');
+        }
 
         const phases = [];
         const began = Date.now();
-        const archive = await readBody(request);
+
+        uploading = true;
+        let archive;
+        try {
+            archive = await readBody(request);
+        } catch (error) {
+            // A phone that walked out of wifi range: said once, without a trace, and nothing to answer.
+            log.on(Facility.PKG).warn(`upload from ${host(request.socket && request.socket.remoteAddress)} stopped: ${error.message}`);
+            if (!response.headersSent && !response.destroyed) failure(response, 400, ErrorCode.BAD_MESSAGE, error.message);
+            return undefined;
+        } finally {
+            uploading = false;
+        }
 
         log.on(Facility.PKG).info(`${host(request.socket && request.socket.remoteAddress)} uploaded ` +
             `${size(archive.length)}${request.headers['x-homebrew-name'] ? ` as ${request.headers['x-homebrew-name']}` : ''} ` +
             `in ${took(Date.now() - began)}`);
 
+        // Handed to the install in the request it reads, and let go here: the pipeline drops it from that
+        // request once it has it, so the upload is not held for the minutes the TV installs.
+        const asked = { source: 'upload', reference: request.headers['x-homebrew-name'], upload: archive };
+        archive = null;
+
         try {
-            const outcome = await installer.install(
-                { source: 'upload', reference: request.headers['x-homebrew-name'], upload: archive },
-                (phase, detail) => phases.push(detail ? `${phase}: ${detail}` : phase)
-            );
+            const outcome = await installer.install(asked, (phase, detail) => phases.push(detail ? `${phase}: ${detail}` : phase));
 
             updates.changed();
 
@@ -368,7 +419,7 @@ const start = () => {
     });
 
     router.on.post('/certificates', async (request, response) => {
-        const verdict = authorise(request.headers['x-homebrew-pin']);
+        const verdict = authorise(request.headers['x-homebrew-pin'], request);
         if (!verdict.ok) return failure(response, verdict.code === ErrorCode.LOCKED_OUT ? 429 : 403, verdict.code, verdict.message);
 
         const sent = await readBody(request, 4 * 1024 * 1024);
@@ -417,7 +468,7 @@ const start = () => {
     });
 
     router.on.delete('/certificates', (request, response) => {
-        const verdict = authorise(request.headers['x-homebrew-pin']);
+        const verdict = authorise(request.headers['x-homebrew-pin'], request);
         if (!verdict.ok) return failure(response, 403, verdict.code, verdict.message);
 
         config.forgetCertificates();
@@ -430,7 +481,7 @@ const start = () => {
     // a sibling application. What brings it back is config.xml — auto-restart if the platform honours
     // it, and the page's own launchAppControl if it does not.
     const exitAfterResponse = (payload, asked, why) => (request, response) => {
-        const verdict = authorise(request.headers['x-homebrew-pin']);
+        const verdict = authorise(request.headers['x-homebrew-pin'], request);
 
         if (!verdict.ok) {
             return failure(response, verdict.code === ErrorCode.LOCKED_OUT ? 429 : 403, verdict.code, verdict.message);
@@ -468,10 +519,11 @@ const start = () => {
         svc.err('no UI assets in this build — the phone will get a 500 and nothing else');
     }
 
-    // App icons, by package id. Not behind the PIN: an <img> cannot send it, and an icon tells nothing a look
-    // at the TV's home row would not. Cached by the phone; the address changes when the picture does.
-    router.on.get('/icons/*', (request, response, { path }) => {
-        const found = appIcons.read(path.slice('/icons/'.length));
+    // App icons, by package id. Not behind the PIN, which an <img> cannot send, but behind a token in the
+    // address only paired phones are given, so no page can probe which apps are installed. Cached by the
+    // phone; the address changes when the picture does.
+    router.on.get('/icons/*', (request, response, { path, query }) => {
+        const found = appIcons.read(path.slice('/icons/'.length), query.get('t'));
         if (!found) return failure(response, 404, ErrorCode.NOT_FOUND, 'No icon kept for that app.');
 
         response.writeHead(200, {
@@ -505,10 +557,20 @@ const start = () => {
         };
 
         const type = types[extname(file)] || 'application/octet-stream';
+        const length = require('fs').statSync(file).size;
 
-        bytes(response, readFileSync(file), type.startsWith('text/') || type.endsWith('javascript')
-            ? `${type}; charset=utf-8`
-            : type);
+        // Streamed rather than read whole, and cached by the phone: the page itself is asked for fresh
+        // each time, so an update shows at once; its sound and pictures need not travel again.
+        response.writeHead(200, {
+            'content-type': type.startsWith('text/') || type.endsWith('javascript') ? `${type}; charset=utf-8` : type,
+            'content-length': length,
+            'cache-control': extname(file) === '.html' ? 'no-cache' : 'public, max-age=86400',
+            'x-content-type-options': 'nosniff',
+            'x-frame-options': 'DENY',
+            'referrer-policy': 'no-referrer'
+        });
+
+        require('fs').createReadStream(file).on('error', () => response.destroy()).pipe(response);
     });
 
     const { allowedHost } = require('./http/hosts.js');
@@ -529,9 +591,18 @@ const start = () => {
         net.err(`cannot listen on ${PORT}: ${error.message}`);
 
         if (error.code === 'EADDRINUSE') {
-            net.err('another app or a system service has claimed that port — nothing will answer');
+            net.err('another app or a system service has claimed that port — trying again shortly');
+
+            // The same server tried again, rather than a second start with a second set of timers — every
+            // 10s at first, then once a minute, for as long as it takes.
+            listenAttempts += 1;
+            setTimeout(() => server.listen(PORT, '0.0.0.0'), listenAttempts < 30 ? 10000 : 60000);
         }
     });
+
+    let listenAttempts = 0;
+
+    server.on('listening', () => { listenAttempts = 0; });
 
     server.listen(PORT, '0.0.0.0', () => {
         net.ok(`listening on 0.0.0.0:${PORT}`);
@@ -554,7 +625,9 @@ const start = () => {
         fromLoopback, greeting: () => ({ ...pairing(), build: BUILD }), recorded, config, protocol, log
     });
 
-    return { server, port: PORT, pin: secret, build: BUILD };
+    process.__homebrewStarted = { server, port: PORT, pin: secret, build: BUILD };
+
+    return process.__homebrewStarted;
 };
 
 // Tizen's service runtime calls onStart; a service exporting anything else loads and never listens.

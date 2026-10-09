@@ -45,8 +45,10 @@ const createUpdates = ({ packages, log, config, appIcons = null, latestRelease =
     // The phone's picture for an installed app: the one this service kept, or one read off the set now.
     const iconFor = (packageId, fallback) => {
         if (!appIcons || !packageId) return fallback || null;
-        if (!appIcons.has(packageId)) appIcons.fromTv(packageId, iconPaths[packageId]);
-        return appIcons.urlOf(packageId) || fallback || null;
+        const kept = appIcons.urlOf(packageId);
+        if (kept) return kept;
+
+        return (appIcons.fromTv(packageId, iconPaths[packageId]) && appIcons.urlOf(packageId)) || fallback || null;
     };
 
     // Package id -> installed version, kept because getPackagesInfo takes six seconds on a full set.
@@ -220,9 +222,14 @@ const createUpdates = ({ packages, log, config, appIcons = null, latestRelease =
     };
 
     // `id` re-asks one entry even when the answer is in hand; without one, everything stale.
+    // Pressing check again within a minute is answered from what was just asked: GitHub allows a TV sixty
+    // requests an hour, and a button pressed ten times should not spend ten of them.
+    const COOLDOWN = 60 * 1000;
+    const justAsked = (repo) => remembered[repo] && Date.now() - remembered[repo].at < COOLDOWN;
+
     const check = async (entries, { id = null } = {}) => {
         const wanted = entries.filter((entry) => askable(entry) &&
-            (id ? entry.id === id : !fresh(entry.source.ref)));
+            (id ? entry.id === id && !justAsked(entry.source.ref) : !fresh(entry.source.ref)));
 
         if (!wanted.length) return mark(entries);
 
@@ -285,7 +292,19 @@ const createUpdates = ({ packages, log, config, appIcons = null, latestRelease =
             }));
     };
 
-    return { mark, check, others, prime, changed };
+    // Asked fresh: what the set holds decides whether an install would replace something.
+    // Fails closed: when the set cannot say what it holds, an install from a repository is asked about
+    // rather than let through. Off a television nothing is installed.
+    const isInstalled = async (packageId) => {
+        try {
+            const list = await packages.list({ say });
+            return list.some((entry) => entry.id === packageId);
+        } catch (error) {
+            return error.code !== 'notOnTv';
+        }
+    };
+
+    return { mark, check, others, isInstalled, prime, changed };
 };
 
 module.exports = { createUpdates, CACHE_TTL, AT_ONCE, INSTALLED_TTL };

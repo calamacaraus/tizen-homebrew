@@ -46,6 +46,8 @@ function Session(client) {
     }
 }
 
+const MAX_OUTPUT = 1024 * 1024;
+
 // `until` finishes as soon as the output proves it worked: vd_appinstall keeps its stream open.
 Session.prototype.exec = function (command, options) {
     const opts = options || {};
@@ -88,7 +90,11 @@ Session.prototype.exec = function (command, options) {
 
         function onData(chunk) {
             const text = chunk.toString();
+
+            // Kept to the last 1MB: the shell relay can run a command that prints for ten minutes, and what is
+            // judged (`until`) and answered is the end of it.
             output += text;
+            if (output.length > MAX_OUTPUT) output = output.slice(output.length - MAX_OUTPUT);
             if (onChunk) {
                 try { onChunk(text); } catch (e) { /* ignore */ }
             }

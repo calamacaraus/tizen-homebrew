@@ -2,7 +2,6 @@
 
 // Six named steps, each taking the work so far further along. Every route runs this same sequence.
 
-const { createHash } = require('crypto');
 
 const sources = require('./sources.js');
 const manifest = require('./manifest.js');
@@ -10,8 +9,9 @@ const zip = require('./zip.js');
 const customize = require('./customize.js');
 
 // Re-signing unpacks every file into memory, so an archive that says it expands past this is refused before
-// it is opened — a zip bomb would otherwise end the service partway through an install.
-const MAX_EXPANDED = 512 * 1024 * 1024;
+// it is opened — a zip bomb would otherwise end the service partway through an install. Set for a TV's
+// memory, not a computer's: the largest Tizen apps (a Kodi build) unpack to well under it.
+const MAX_EXPANDED = 256 * 1024 * 1024;
 const preview = require('./preview.js');
 const installer = require('./installer.js');
 const { size, took, rate } = require('../obs/units.js');
@@ -20,12 +20,18 @@ const memory = require('../obs/memory.js');
 // Failures after which the TV may still be installing the staged file.
 const UNKNOWN_OUTCOME = ['sdbTimeout', 'sdbClosed', 'sdbReset'];
 
+// A holder the signer empties as it takes the package, so no caller's variable keeps it alive meanwhile.
+const takeOnce = (buffer) => ({ take() { const held = buffer; buffer = null; return held; } });
+
 const refuse = (code, message) => Object.assign(new Error(message), { code });
 
 const QUIET = ['debug', 'info', 'ok', 'warn', 'err']
     .reduce((noop, level) => ({ ...noop, [level]: () => {} }), {});
 
-const createInstaller = ({ sdb, device, config, resigner, store, log, appIcons = null }) => {
+// Tizen Homebrew's own package: it holds the signing keys and the PIN, so only its own list replaces it.
+const SELF = 'GJBBYNLkgP';
+
+const createInstaller = ({ sdb, device, config, resigner, store, log, appIcons = null, isInstalled = async () => false }) => {
     const say = log ? log.on('pkg') : QUIET;
     const sdbSays = log ? log.on('sdb') : QUIET;
 
@@ -84,8 +90,11 @@ const createInstaller = ({ sdb, device, config, resigner, store, log, appIcons =
                 log
             });
 
+            // An upload arrived in the request; from here it lives only in what is carried along.
+            request.upload = null;
+
             const spent = Date.now() - began;
-            const sha256 = createHash('sha256').update(archive).digest('hex');
+            const sha256 = await installer.digest(archive);
 
             say.ok(`got ${name}: ${size(archive.length)} in ${took(spent)} (${rate(archive.length, spent)})`);
 
@@ -106,7 +115,13 @@ const createInstaller = ({ sdb, device, config, resigner, store, log, appIcons =
         const readIdentity = (carried) => {
             const expanded = zip.expandedSize(zip.fromBuffer(carried.archive));
 
-            if (expanded !== null && expanded > MAX_EXPANDED) {
+            // No directory to say what it expands to (ZIP64, or damage) is not a package this TV installs.
+            if (expanded === null) {
+                throw refuse('badPackage', `${carried.name || 'That file'} has no readable directory of its files, ` +
+                    'so what it expands to cannot be checked. It was not installed.');
+            }
+
+            if (expanded > MAX_EXPANDED) {
                 throw refuse('tooLarge', `${carried.name || 'That package'} expands to ${size(expanded)}, ` +
                     `more than the ${size(MAX_EXPANDED)} this TV re-signs in memory.`);
             }
@@ -119,10 +134,54 @@ const createInstaller = ({ sdb, device, config, resigner, store, log, appIcons =
             return { ...carried, identity, described: preview.describe(carried.archive, identity) };
         };
 
+        // What a package turns out to be is checked against what it was asked for as. Every package is re-signed
+        // with this TV's one key, so the TV's own rule — an update must come from the same author — no longer
+        // tells one source from another; this does.
+        const guardIdentity = async (carried) => {
+            const { packageId } = carried.identity;
+            const listed = request.source === 'catalog'
+                ? (store.select('catalog') || []).find((entry) => entry.id === request.reference) : null;
+            const repository = listed ? listed.repository || 'official' : null;
+            const fromRepository = Boolean(repository && repository !== 'official');
+
+            if (request.expect && request.expect !== packageId) {
+                throw refuse('packageMismatch', `${carried.name || 'The download'} is the package ${packageId}, not ` +
+                    `${request.expect} that it was listed as. It was not installed.`);
+            }
+
+            if (packageId === SELF && fromRepository) {
+                throw refuse('replacesOther', 'An added repository cannot replace Tizen Homebrew itself; only its own ' +
+                    'list, or a file or link you choose yourself, can.');
+            }
+
+            // A confirmation answers one refusal: it is sent back with the package it was about, so a download that
+            // turns out different the second time is checked again (by `expect`, above).
+            if (!fromRepository || (request.confirm && request.expect === packageId) || !(await isInstalled(packageId))) return carried;
+
+            // Installed already: fine when this same repository installed it last, asked otherwise. Decided from
+            // the record of the install itself, never from which list entries happen to name the same file —
+            // a catalog can name anything.
+            const before = (config.read().origins || {})[packageId];
+
+            if (before && before.source === 'catalog' && before.repository === repository) return carried;
+
+            const where = before
+                ? ({ catalog: before.repository === 'official' ? 'the Tizen Homebrew list' : 'another repository',
+                    github: 'the GitHub tab', url: 'a link', upload: 'a phone upload', file: 'a USB stick' }[before.source] || 'elsewhere')
+                : 'somewhere Homebrew has no record of';
+
+            throw Object.assign(refuse('replacesOther', `${carried.identity.name || packageId} is already on this TV, ` +
+                `installed from ${where}. Installing this would replace it with the copy from this repository.`),
+            { confirmable: true, packageId });
+        };
+
         // Your own name and icon for this package, if you set them: changed before signing, so they are signed.
         const applyCustomization = async (carried) => {
             const stored = (config.read().customizations || {})[carried.identity.packageId];
             if (!stored) return carried;
+
+            // Rewriting the package inflates all of it, so first it is checked to expand to what it declares.
+            await zip.verifySizes(zip.fromBuffer(carried.archive), MAX_EXPANDED);
 
             const bytes = stored.icon ? customize.iconBytes(config.CONFIG_DIR, stored.icon) : null;
             const custom = { name: stored.name, icon: bytes ? { type: stored.icon.type, bytes } : null };
@@ -155,21 +214,51 @@ const createInstaller = ({ sdb, device, config, resigner, store, log, appIcons =
             }
 
             const sign = await resigner();
-            const { archive, device, files } = await sign(carried.archive);
 
-            say.ok(`re-signed ${files} files for ${device || 'this television'}`);
+            // Handed over, not shared: once the signer has unpacked it, nothing here holds the package it
+            // was given, so its memory can go while the signed copy is built.
+            const input = carried.archive;
+            carried.archive = null;
 
-            return { ...carried, archive };
+            // Straight into a staging file of its own, so the signed package is never held in memory; a signer
+            // that does not write files (a test's) answers with a buffer, staged as before.
+            const target = installer.reserve(carried.identity);
+            stagedPath = target;
+
+            const signed = await sign(takeOnce(input), { toFile: target });
+
+            say.ok(`re-signed ${signed.files} files for ${signed.device || 'this television'}`);
+
+            if (signed.path) {
+                return { ...carried, archive: null, signedFile: { path: signed.path, size: signed.size, sha256: signed.sha256 } };
+            }
+
+            stagedPath = null;
+            return { ...carried, archive: signed.archive };
         };
 
-        const stageOnDisk = (carried) => {
+        // Once on disk the package is not needed in memory any more: only its icon is kept, for the phone.
+        const stageOnDisk = async (carried) => {
             phase('staging', carried.identity.name || carried.identity.packageId);
 
-            const stagedPath = installer.stage(carried.archive, carried.identity);
+            if (carried.signedFile) {
+                const { path, size: written, sha256 } = carried.signedFile;
+                await installer.verifyStaged(path, sha256);
+                say.ok(`staged ${size(written)} to ${path}`);
 
-            say.ok(`staged ${size(carried.archive.length)} to ${stagedPath}`);
+                const icon = appIcons ? appIcons.iconOfFile(path, carried.identity) : null;
+                return { ...carried, icon, stagedPath: path };
+            }
 
-            return { ...carried, stagedPath };
+            const length = carried.archive.length;
+            const path = await installer.stage(carried.archive, carried.identity);
+
+            stagedPath = path;
+            say.ok(`staged ${size(length)} to ${path}`);
+
+            const icon = appIcons ? appIcons.iconOf(carried.archive, carried.identity) : null;
+
+            return { ...carried, archive: null, icon, stagedPath: path };
         };
 
         const runInstaller = async (carried) => {
@@ -201,7 +290,15 @@ const createInstaller = ({ sdb, device, config, resigner, store, log, appIcons =
             const origin = carried.origin || {};
             const listed = store.select('catalog') || [];
 
+            const asked = request.source === 'catalog' ? listed.find((entry) => entry.id === request.reference) : null;
+            const askedRepository = asked ? asked.repository || 'official' : null;
+
             const same = listed.filter((entry) => {
+                // A catalog chooses its entries' sources freely, so one naming the same file as someone else's
+                // does not get to answer for that install — only for its own.
+                const repository = entry.repository || 'official';
+                if (/^cat-/.test(repository) && repository !== askedRepository) return false;
+
                 if (origin.type === 'github' && entry.source.type === 'github') {
                     if (String(entry.source.ref).toLowerCase() !== String(origin.repo || '').toLowerCase()) return false;
                     if (!entry.source.asset) return true;
@@ -290,21 +387,27 @@ const createInstaller = ({ sdb, device, config, resigner, store, log, appIcons =
         installer.sweep(undefined, { everything: false });
 
         try {
-            const readied = await probeReadiness();
-            const acquired = await acquirePackage(readied);
-            const identified = await applyCustomization(readIdentity(acquired));
-            const signed = await resign(identified);
-            const staged = stageOnDisk(signed);
-            stagedPath = staged.stagedPath;
-            const installed = await runInstaller(staged);
-            const outcome = recordOutcome(installed);
+            // One `carried` passed along and replaced at each step, so the copy a step leaves behind — the
+            // download once customised, the customised one once signed — can be freed rather than held by a
+            // name of its own until the install ends.
+            let carried = await probeReadiness();
+            carried = await acquirePackage(carried);
+            carried = readIdentity(carried);
+            carried = await guardIdentity(carried);
+            carried = await applyCustomization(carried);
+            carried = await resign(carried);
+            carried = await stageOnDisk(carried);
+            carried = await runInstaller(carried);
+
+            const outcome = recordOutcome(carried);
 
             // The icon the TV now shows for it, your own when you set one, kept for the phone's list.
-            if (appIcons) appIcons.fromArchive(installed.archive, installed.identity);
+            if (appIcons && carried.icon) appIcons.keep(carried.identity.packageId, carried.icon);
 
             held.at('finishing');
 
             say.ok(`installed ${outcome.name || outcome.packageId} ${outcome.version || ''} in ${took(at())}`);
+            carried = null;
 
             return outcome;
         } catch (error) {
@@ -324,7 +427,11 @@ const createInstaller = ({ sdb, device, config, resigner, store, log, appIcons =
             // Left when the TV may still be installing it — the session dropped or timed out, so its outcome
             // is unknown — and swept up later, once it is old enough that nothing can be reading it.
             if (stagedPath && UNKNOWN_OUTCOME.indexOf(failure && failure.code) !== -1) {
-                say.info(`left the staged copy for the TV to finish with; it is removed later`);
+                say.info('left the staged copy for the TV to finish with; it is removed once nothing can be reading it');
+
+                // Not left until the next install or restart: swept once it is old enough.
+                const later = setTimeout(() => installer.sweep(undefined, { everything: false }), installer.LEFT_BEHIND + 1000);
+                if (later.unref) later.unref();
             } else if (stagedPath) {
                 if (installer.unstage(stagedPath)) say.debug(`removed the staged copy ${stagedPath}`);
                 else say.warn(`could not remove the staged copy ${stagedPath}`);

@@ -114,7 +114,8 @@ const createAutoUpdate = ({ library, updates, installer, config, store, log, bro
                     }
 
                     try {
-                        await installer.install({ source: 'catalog', reference: entry.id });
+                        // Unattended, so the download has to be the package this entry installed before.
+                        await installer.install({ source: 'catalog', reference: entry.id, expect: entry.packageId || null });
                         updates.changed();
                         updated.push(entry.name);
                         say.ok(`updated ${entry.name}`);

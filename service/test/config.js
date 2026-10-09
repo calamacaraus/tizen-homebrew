@@ -92,6 +92,30 @@ check('nothing to adopt is not an error', config.adoptHandoff() === null, 'a mis
         config.pairingPin() === minted, 'the code changed when the certificates were cleared');
 }
 
+{
+    // Power lost mid-write, or flash damage: the file no longer parses.
+    config.update({ author: 'KEPT', pin: '654321' });
+    config.update({ note: 'a later change' });
+
+    const path = require('path').join(process.env.HOMEBREW_CONFIG_DIR, 'homebrewConfig.json');
+    writeFileSync(path, '{"author":"KEPT","pin":"65');
+
+    const quiet = console.error;
+    console.error = () => {};
+    const after = config.read();
+    console.error = quiet;
+
+    check('a damaged configuration is restored from its last good copy, keys and PIN with it',
+        after.author === 'KEPT' && after.pin === '654321', JSON.stringify({ author: after.author, pin: after.pin }));
+
+    check('and the damaged file is kept aside, not overwritten',
+        require('fs').readdirSync(process.env.HOMEBREW_CONFIG_DIR).some((name) => /\.damaged-\d+$/.test(name)), 'gone');
+
+    let threw = false;
+    try { config.read().repositories.push('x'); } catch (e) { threw = true; }
+    check('what a read returns cannot be changed in place by accident', threw, 'changed');
+}
+
 config.clear();
 
 const failed = results.filter((ok) => !ok).length;
