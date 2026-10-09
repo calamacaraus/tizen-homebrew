@@ -94,6 +94,32 @@ const dropIcon = (configDir, stored) => {
     } catch (e) { /* already gone */ }
 };
 
+// Icon files no customisation points at any more — a write that was interrupted, say. Your own icon for an
+// app that is not installed now is kept on purpose: installing it again brings it back.
+const sweepIcons = (configDir, customizations) => {
+    const wanted = {};
+    Object.keys(customizations || {}).forEach((id) => {
+        const icon = customizations[id] && customizations[id].icon;
+        if (icon && icon.file) wanted[icon.file] = true;
+    });
+
+    let names = [];
+    try {
+        names = require('fs').readdirSync(iconsDir(configDir));
+    } catch (e) {
+        return 0;
+    }
+
+    return names.filter((name) => !wanted[name]).filter((name) => {
+        try {
+            unlinkSync(join(iconsDir(configDir), name));
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }).length;
+};
+
 // The bytes of a stored icon, from its file — or, for one stored before files, from the configuration.
 const iconBytes = (configDir, stored) => iconBytesOf(configDir, stored);
 
@@ -212,5 +238,5 @@ const sourceFor = (listed, installedFrom, packageId) => {
     return chosen ? chosen.id : null;
 };
 
-module.exports = { sourceFor, declaredIcons, apply, validate, iconFileOf, renameWidget, reiconWidget, relabelNative, storeIcon, dropIcon, iconBytes,
+module.exports = { sweepIcons, sourceFor, declaredIcons, apply, validate, iconFileOf, renameWidget, reiconWidget, relabelNative, storeIcon, dropIcon, iconBytes,
     storedSize, MAX_ICON, MAX_NAME, MAX_CUSTOMIZED, MAX_ICONS_TOTAL };

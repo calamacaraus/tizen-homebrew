@@ -28,14 +28,14 @@ const identify = (archive) => {
 
         const named = /<name\b[^>]*>([^<]*)<\/name>/.exec(xml);
 
-        return {
+        return checked({
             packageId,
             appId: attribute(xml, 'tizen:application', 'id'),
             name: named ? named[1].trim() : null,
             version: attribute(xml, 'widget', 'version'),
             iconPath: attribute(xml, 'icon', 'src'),
             isWgt: true
-        };
+        }, 'config.xml');
     }
 
     const native = readFromZip(archive, 'tizen-manifest.xml');
@@ -48,19 +48,37 @@ const identify = (archive) => {
 
         const icon = /<icon\b[^>]*>([^<]*)<\/icon>/.exec(xml);
 
-        return {
+        return checked({
             packageId,
             appId: attribute(xml, 'ui-application', 'appid'),
             name: null,
             version: attribute(xml, 'manifest', 'version'),
             iconPath: icon ? icon[1].trim() : null,
             isWgt: false
-        };
+        }, 'tizen-manifest.xml');
     }
 
     throw badPackage('No config.xml or tizen-manifest.xml — this is not a Tizen package.');
 };
 
+// A package id goes into the install command, so it is held to what Tizen itself allows: a widget's is ten
+// letters and digits, a native one's a reverse-domain name. Anything else — a space, a quote, a semicolon —
+// is a package built to run something on the television, and is refused before it gets near a shell.
+const PACKAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const APP_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+const checked = (identity, manifestName) => {
+    if (!PACKAGE_ID.test(identity.packageId)) {
+        throw badPackage(`${manifestName} declares a package id Tizen does not allow ("${String(identity.packageId).slice(0, 40)}").`);
+    }
+
+    if (identity.appId !== null && !APP_ID.test(identity.appId)) {
+        throw badPackage(`${manifestName} declares an application id Tizen does not allow.`);
+    }
+
+    return identity;
+};
+
 const badPackage = (message) => Object.assign(new Error(message), { code: 'badPackage' });
 
-module.exports = { identify, readFromZip };
+module.exports = { identify, readFromZip, PACKAGE_ID };

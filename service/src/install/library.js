@@ -11,7 +11,7 @@
 // than taking the others with it. The repositories live in the configuration, beside the certificates,
 // so they survive restarts and updates of this app.
 
-const { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } = require('fs');
+const { readFileSync, writeFileSync, existsSync, statSync, mkdirSync, unlinkSync } = require('fs');
 const { createHash } = require('crypto');
 const { join } = require('path');
 
@@ -228,6 +228,9 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
 
         config.update({ repositories: kept.filter((repository) => repository.id !== id) });
         delete status[id];
+
+        // Its cached list goes with it.
+        try { unlinkSync(cachePathOf(gone)); } catch (e) { /* never cached */ }
 
         say.info(`removed ${gone.ref}`);
 

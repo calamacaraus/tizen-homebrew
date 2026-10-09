@@ -29,6 +29,7 @@ const { createCatalog } = require('./install/catalog.js');
 const { createUpdates } = require('./install/updates.js');
 const { createLibrary } = require('./install/library.js');
 const { createAutoUpdate } = require('./install/autoupdate.js');
+const { createAppIcons } = require('./install/appicons.js');
 
 const { ErrorCode } = protocol;
 
@@ -92,7 +93,10 @@ const start = () => {
     const library = createLibrary({ config, official: catalog, cacheDir: join(homedir(), 'share'), log });
 
     // No prime() at startup: priming getPackagesInfo wedges the service on Tizen 9.0.
-    const updates = createUpdates({ packages, log, config });
+    // Every installed app's icon, for the phone's list.
+    const appIcons = createAppIcons({ dir: join(config.CONFIG_DIR, 'homebrewAppIcons'), log });
+
+    const updates = createUpdates({ packages, log, config, appIcons });
 
     log.on(Facility.CAT).info(`origin ${catalogUrl}${stored ? ' (from the stored configuration)' : ''}`);
     log.on(Facility.CFG).info(`cache ${catalogCache}`);
@@ -112,7 +116,7 @@ const start = () => {
         return (archive) => resign(archive, config.read());
     };
 
-    const installer = createInstaller({ sdb, device, config, resigner, store, log });
+    const installer = createInstaller({ sdb, device, config, resigner, store, log, appIcons });
 
     // Filled in once the socket server is up, at the end of this function. The device sweep and the
     // auto-updater are the only things that learn something without being asked, so they push.
@@ -123,7 +127,14 @@ const start = () => {
         broadcast: (type, payload) => { if (sockets) sockets.broadcastPaired(type, payload); }
     });
 
-    if (device.onTv) autoUpdate.start();
+    if (device.onTv) {
+        require('./install/customize.js').sweepIcons(config.CONFIG_DIR, config.read().customizations);
+
+        const swept = require('./install/installer.js').sweep();
+        if (swept) log.on(Facility.PKG).info(`removed ${swept} staged ${swept === 1 ? 'package' : 'packages'} an earlier install left behind`);
+
+        autoUpdate.start();
+    }
 
     const announce = (state, previous) => {
         if (!previous) {
@@ -456,6 +467,22 @@ const start = () => {
     } else {
         svc.err('no UI assets in this build — the phone will get a 500 and nothing else');
     }
+
+    // App icons, by package id. Not behind the PIN: an <img> cannot send it, and an icon tells nothing a look
+    // at the TV's home row would not. Cached by the phone; the address changes when the picture does.
+    router.on.get('/icons/*', (request, response, { path }) => {
+        const found = appIcons.read(path.slice('/icons/'.length));
+        if (!found) return failure(response, 404, ErrorCode.NOT_FOUND, 'No icon kept for that app.');
+
+        response.writeHead(200, {
+            'content-type': found.type,
+            'content-length': found.bytes.length,
+            'cache-control': 'public, max-age=31536000, immutable',
+            'x-content-type-options': 'nosniff',
+            'content-security-policy': "default-src 'none'"
+        });
+        response.end(found.bytes);
+    });
 
     router.on.get('/*', (request, response, { path }) => {
         if (!uiRoot) return failure(response, 500, ErrorCode.INTERNAL, 'UI assets are missing from this build.');

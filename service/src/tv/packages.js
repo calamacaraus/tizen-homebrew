@@ -73,7 +73,7 @@ const named = (say) => new Promise((resolve) => {
         const held = id ? byPackage.get(id) : null;
 
         if (id && !(held && held.version)) {
-            byPackage.set(id, { name: app.name || null, version: app.version || null });
+            byPackage.set(id, { name: app.name || null, version: app.version || null, iconPath: app.iconPath || null });
         }
 
         return byPackage;
@@ -109,7 +109,7 @@ const listOnDisk = async (options) => {
         const known = fromPlatform.get(id);
         const { version, name } = known && (known.version || known.name) ? known : await describe(id, root);
 
-        found.push({ id, name: name || id, version, totalSize: null, lastModified: null });
+        found.push({ id, name: name || id, version, iconPath: (known && known.iconPath) || null, totalSize: null, lastModified: null });
     }
 
     if (say && !reported && fromPlatform.size) {

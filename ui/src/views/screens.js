@@ -131,7 +131,39 @@ const catalogued = (app) => {
         : ''}</span>`;
 };
 
+// Where the copy on the TV came from, in a few words: the list and repository, the GitHub tab, a URL,
+// an upload or a USB stick — or that it was there before Homebrew kept a record.
+const repositoryName = (id, state) => {
+    if (!id || id === 'official') return 'Tizen Homebrew list';
+    const found = (state.repositories || []).find((repository) => repository.id === id);
+    return found ? found.name : 'a repository since removed';
+};
+
+const originText = (app, state) => {
+    const origin = app.origin;
+
+    if (!origin) return 'origin unknown · installed before this Homebrew kept records';
+    if (origin.replaced) return 'changed outside Homebrew since it was installed from here';
+
+    const what = {
+        catalog: () => repositoryName(origin.repository, state) +
+            ((origin.repository || 'official') === 'official' && origin.repo ? ` · ${origin.repo}` : ''),
+        github: () => `GitHub ${origin.repo || ''}`.trim(),
+        url: () => `link on ${origin.host || 'the web'}`,
+        upload: () => 'phone upload',
+        file: () => 'USB stick'
+    }[origin.source];
+
+    const file = origin.asset || origin.file;
+    const day = origin.at ? String(origin.at).slice(0, 10) : null;
+
+    return [what ? what() : origin.source, file, origin.tag, day, origin.verified ? 'sha256 ✓' : null]
+        .filter(Boolean).join(' · ');
+};
+
 const action = (app) => {
+    if (app.unlisted) return '';
+
     if (!app.installed) {
         return html`<button class="btn btn-ghost" data-focus="app:${app.id}"
                        data-on-click="install:catalog:${app.id}">install</button>`;
@@ -142,13 +174,15 @@ const action = (app) => {
                        data-on-click="install:catalog:${app.id}">reinstall</button>`;
     }
 
-    return html`<button class="btn ${app.update ? 'btn-signal' : 'btn-ghost'}"
-                   data-focus="app:${app.id}" data-on-click="install:catalog:${app.id}"
-                   ${app.update ? '' : 'disabled'}>update</button>`;
+    // Up to date: nothing to press, and the room goes to the name.
+    if (!app.update) return '';
+
+    return html`<button class="btn btn-signal"
+                   data-focus="app:${app.id}" data-on-click="install:catalog:${app.id}">update</button>`;
 };
 
 // A collection's entries are checked by asking for the collection, which "check all" does.
-const recheck = (app, checking) => (app.source.type !== 'github' || app.collection ? '' : html`
+const recheck = (app, checking) => (app.unlisted || app.source.type !== 'github' || app.collection ? '' : html`
   <button class="btn btn-quiet" data-focus="check:${app.id}" data-on-click="check:${app.id}"
           ${checking ? 'disabled' : ''}>${checking === app.id ? 'checking…' : 'check'}</button>`);
 
@@ -160,17 +194,21 @@ const dressed = (app, customizations) => {
     return { ...app, name: custom.name || app.name, icon: custom.icon || app.icon };
 };
 
-const edit = (app) => (app.installed && app.packageId ? html`
+// Not for an app no list names: a change to it could not be installed again without the file.
+const edit = (app) => (app.installed && app.packageId && !app.unlisted ? html`
   <button class="btn btn-quiet btn-icon" data-focus="customize:${app.packageId}"
           data-on-click="customize:${app.packageId}" title="Your own name and icon"
           aria-label="Edit name and icon">✎</button>` : '');
 
-const row = (app, checking, customizations) => {
+const row = (app, checking, customizations, state = null) => {
     const shown = dressed(app, customizations);
+    const below = state && app.installed
+        ? html`${catalogued(app)}<span class="micro mono wrap origin">${originText(app, state)}</span>`
+        : catalogued(app);
 
     return html`
       <div class="row split">
-        ${identity(shown, catalogued(app))}
+        ${identity(shown, below)}
         <span class="controls">
           ${edit(app)}
           ${recheck(app, checking)}
@@ -273,21 +311,35 @@ const run = (state) => {
       </div>`;
 };
 
+// One row per package on this TV: the same app can be listed by more than one repository, and the
+// built-in list answers for it first. What is not installed is offered below, by where it is listed.
+const installedRows = (state) => {
+    const seen = {};
+    const rank = (app) => ((app.repository || 'official') === 'official' ? 0 : app.collection ? 2 : 1);
+
+    state.catalog.filter((app) => app.installed)
+        .slice()
+        .sort((a, b) => rank(a) - rank(b))
+        .forEach((app) => {
+            const key = app.packageId || app.id;
+            if (!seen[key]) seen[key] = app;
+        });
+
+    // Installed from an upload, a URL, the GitHub tab or a stick: no list names them, but they are on the TV.
+    (state.others || []).forEach((app) => {
+        if (!seen[app.packageId]) seen[app.packageId] = app;
+    });
+
+    return Object.keys(seen).map((key) => seen[key])
+        .sort((a, b) => (Number(Boolean(b.update)) - Number(Boolean(a.update))) || String(a.name).localeCompare(String(b.name)));
+};
+
 const catalog = (state) => {
     const pending = state.catalog.filter((app) => app.update).length;
     const rebuilt = state.catalog.filter((app) => app.rebuilt).length;
     const busy = Boolean(state.updateRun && state.updateRun.running);
 
-    const body = state.catalog.length === 0
-        ? html`<p class="small">Nothing listed yet. Add a repository under repos, or use upload, github or url.</p>`
-        : html`${grouped(state).map((group) => html`
-            <div class="stack stack-tight">
-              ${grouped(state).length > 1 ? html`<span class="micro mono">${group.repository.name}</span>` : ''}
-              <div class="list">${group.apps.map((app) => row(app, state.checking, state.customizations))}</div>
-            </div>`)}`;
-
-    return html`${customizer(state)}${run(state)}${section('Available', body,
-    html`<span class="controls">
+    const toolbar = html`<span class="toolbar">
       <button class="btn btn-ghost" data-focus="refresh" data-on-click="catalog:refresh">refresh</button>
       <button class="btn btn-ghost" data-focus="check-all" data-on-click="checkAll"
               ${state.checking || busy ? 'disabled' : ''}>${state.checking === 'all'
@@ -296,7 +348,37 @@ const catalog = (state) => {
               ${busy ? 'disabled' : ''}>update all · ${pending}</button>` : ''}
       ${rebuilt && !pending ? html`<button class="btn btn-ghost" data-focus="update-rebuilt" data-on-click="updateAll:rebuilt"
               ${busy ? 'disabled' : ''}>reinstall rebuilt · ${rebuilt}</button>` : ''}
-    </span>`)}`;
+    </span>`;
+
+    if (state.catalog.length === 0) {
+        return html`${customizer(state)}${run(state)}${section('Apps', html`
+          ${toolbar}
+          <p class="small">Nothing listed yet. Add a repository under repos, or use upload, github or url.</p>`)}`;
+    }
+
+    const installed = installedRows(state);
+    const held = {};
+    installed.forEach((app) => { if (app.packageId) held[app.packageId] = true; });
+
+    // Not installed, and not another listing of a package that is.
+    const offered = { ...state, catalog: state.catalog.filter((app) => !app.installed && !(app.packageId && held[app.packageId])) };
+    const groups = grouped(offered);
+
+    const onTv = installed.length
+        ? html`<div class="list">${installed.map((app) => row(app, state.checking, state.customizations, state))}</div>`
+        : html`<p class="small">Nothing from these lists is installed yet.</p>`;
+
+    const available = groups.length
+        ? html`${groups.map((group) => html`
+            <div class="stack stack-tight">
+              <span class="micro mono">${group.repository.name} · ${group.apps.length}</span>
+              <div class="list">${group.apps.map((app) => row(app, state.checking, state.customizations))}</div>
+            </div>`)}`
+        : html`<p class="small">Everything listed is installed.</p>`;
+
+    return html`${customizer(state)}${run(state)}
+      ${section(`On this TV · ${installed.length}`, html`${toolbar}${onTv}`)}
+      ${section('Available to install', available)}`;
 };
 
 const MODES = [
