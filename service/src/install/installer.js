@@ -1,6 +1,7 @@
 'use strict';
 
-const { writeFileSync, mkdirSync, statSync } = require('fs');
+const { writeFileSync, mkdirSync, openSync, readSync, closeSync, readdirSync, unlinkSync, statSync } = require('fs');
+const { createHash, randomBytes } = require('crypto');
 
 const { interpret, settled } = require('./verdicts.js');
 
@@ -10,19 +11,83 @@ const INSTALL_TIMEOUT = 180000;
 const problem = (code, message) => Object.assign(new Error(message), { code });
 
 // Running on the TV makes staging an ordinary file write, with no ADB sync protocol to reimplement.
-const stage = (archive, { isWgt }) => {
-    const path = `${STAGING_DIR}/package.${isWgt ? 'wgt' : 'tpk'}`;
+// Each install gets a name of its own, so nothing can be put in its place ahead of time, and what is on disk
+// is read back and hashed before it is installed: the bytes installed are the bytes that were signed.
+const OURS = /^homebrew-[0-9a-f]{16}\.(wgt|tpk)$/;
 
-    mkdirSync(STAGING_DIR, { recursive: true });
-    writeFileSync(path, archive);
+const digest = (buffer) => createHash('sha256').update(buffer).digest('hex');
 
-    const written = statSync(path).size;
+// Read back in pieces, so checking a large package does not hold a second copy of it in memory.
+const digestOfFile = (path) => {
+    const hash = createHash('sha256');
+    const chunk = Buffer.alloc(256 * 1024);
+    const handle = openSync(path, 'r');
 
-    if (written !== archive.length) {
-        throw problem('internal', `Staged ${written} bytes but the package is ${archive.length}.`);
+    try {
+        for (let got = readSync(handle, chunk, 0, chunk.length, null); got > 0; got = readSync(handle, chunk, 0, chunk.length, null)) {
+            hash.update(chunk.slice(0, got));
+        }
+    } finally {
+        closeSync(handle);
+    }
+
+    return hash.digest('hex');
+};
+
+const stage = (archive, { isWgt }, dir = STAGING_DIR) => {
+    const path = `${dir}/homebrew-${randomBytes(8).toString('hex')}.${isWgt ? 'wgt' : 'tpk'}`;
+
+    mkdirSync(dir, { recursive: true });
+    // Created new, never written through an existing file. Readable as any staged package is: the TV's own
+    // installer reads it, possibly as another user, and a signed package holds nothing secret.
+    writeFileSync(path, archive, { flag: 'wx' });
+
+    if (digestOfFile(path) !== digest(archive)) {
+        unstage(path);
+        throw problem('internal', 'The staged package does not match what was signed; it was removed and not installed.');
     }
 
     return path;
+};
+
+// After every install, whatever its outcome: the package is in the TV's own store by then, or refused.
+const unstage = (path) => {
+    if (!path) return false;
+
+    try {
+        unlinkSync(path);
+        return true;
+    } catch (e) {
+        return false;
+    }
+};
+
+// What an install interrupted by a restart left behind, and the single package.wgt earlier versions of this
+// service kept after every install. The laptop's tools stage a package.wgt into the same directory too, so
+// that one is left alone unless it is old enough that no install can still be reading it.
+const LEFT_BEHIND = 10 * 60 * 1000;
+
+const stale = (path) => {
+    try {
+        return Date.now() - statSync(path).mtime.getTime() > LEFT_BEHIND;
+    } catch (e) {
+        return false;
+    }
+};
+
+// `everything` at startup, when no install can be running; between installs only what is old enough.
+const sweep = (dir = STAGING_DIR, { everything = true } = {}) => {
+    let names = [];
+
+    try {
+        names = readdirSync(dir);
+    } catch (e) {
+        return 0;
+    }
+
+    return names.filter((name) => (OURS.test(name) && (everything || stale(`${dir}/${name}`))) ||
+            ((name === 'package.wgt' || name === 'package.tpk') && stale(`${dir}/${name}`)))
+        .filter((name) => unstage(`${dir}/${name}`)).length;
 };
 
 const run = (session, path, packageId) =>
@@ -31,4 +96,4 @@ const run = (session, path, packageId) =>
         until: settled
     }).then((output) => interpret(output, { packageId }));
 
-module.exports = { stage, run, STAGING_DIR };
+module.exports = { stage, unstage, sweep, run, digestOfFile, STAGING_DIR, LEFT_BEHIND };

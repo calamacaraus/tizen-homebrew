@@ -17,12 +17,15 @@ const installer = require('./installer.js');
 const { size, took, rate } = require('../obs/units.js');
 const memory = require('../obs/memory.js');
 
+// Failures after which the TV may still be installing the staged file.
+const UNKNOWN_OUTCOME = ['sdbTimeout', 'sdbClosed', 'sdbReset'];
+
 const refuse = (code, message) => Object.assign(new Error(message), { code });
 
 const QUIET = ['debug', 'info', 'ok', 'warn', 'err']
     .reduce((noop, level) => ({ ...noop, [level]: () => {} }), {});
 
-const createInstaller = ({ sdb, device, config, resigner, store, log }) => {
+const createInstaller = ({ sdb, device, config, resigner, store, log, appIcons = null }) => {
     const say = log ? log.on('pkg') : QUIET;
     const sdbSays = log ? log.on('sdb') : QUIET;
 
@@ -213,6 +216,28 @@ const createInstaller = ({ sdb, device, config, resigner, store, log }) => {
             return same;
         };
 
+        // Where this install came from, in words the phone can show beside the app: which list and which
+        // repository, or the GitHub tab, a URL, an upload, a USB stick.
+        const originOf = (carried) => {
+            const origin = carried.origin || {};
+            const listed = request.source === 'catalog'
+                ? (store.select('catalog') || []).find((entry) => entry.id === request.reference) : null;
+            const file = (value) => (value ? String(value).split('/').pop().slice(0, 120) : null);
+
+            return {
+                source: request.source,
+                entry: listed ? listed.id : null,
+                repository: listed ? listed.repository || 'official' : null,
+                repo: origin.repo || null,
+                asset: origin.asset || null,
+                tag: origin.tag || null,
+                host: origin.url ? (() => {
+                    try { return new URL(origin.url).host; } catch (e) { return null; }
+                })() : null,
+                file: request.source === 'upload' || request.source === 'file' ? file(carried.name || request.reference) : null
+            };
+        };
+
         const recordOutcome = (carried) => {
             const { packageId, appId, name, version } = carried.identity;
             const at = new Date().toISOString();
@@ -235,7 +260,19 @@ const createInstaller = ({ sdb, device, config, resigner, store, log }) => {
                     .forEach((id) => { delete installedFrom[id]; });
             }
 
+            const origins = { ...(kept.origins || {}) };
+            origins[packageId] = { ...originOf(carried), name: name || null, version: version || null,
+                sha256: carried.sha256 || null, verified: Boolean(carried.verified), at };
+
+            const recorded = Object.keys(origins);
+            if (recorded.length > 200) {
+                recorded.sort((a, b) => String(origins[b].at).localeCompare(String(origins[a].at)))
+                    .slice(200)
+                    .forEach((id) => { delete origins[id]; });
+            }
+
             config.update({
+                origins,
                 lastInstalled: [{ packageId, appId, name, version, sha256: carried.sha256 || null, at }]
                     .concat(previous)
                     .slice(0, 20),
@@ -245,14 +282,25 @@ const createInstaller = ({ sdb, device, config, resigner, store, log }) => {
             return { packageId, appId, name, version, sha256: carried.sha256 || null, verified: Boolean(carried.verified) };
         };
 
+        // Kept so the finally below can remove it whatever happened after it was written.
+        let stagedPath = null;
+        let failure = null;
+
+        // Anything an install interrupted earlier left, once it is old enough.
+        installer.sweep(undefined, { everything: false });
+
         try {
             const readied = await probeReadiness();
             const acquired = await acquirePackage(readied);
             const identified = await applyCustomization(readIdentity(acquired));
             const signed = await resign(identified);
             const staged = stageOnDisk(signed);
+            stagedPath = staged.stagedPath;
             const installed = await runInstaller(staged);
             const outcome = recordOutcome(installed);
+
+            // The icon the TV now shows for it, your own when you set one, kept for the phone's list.
+            if (appIcons) appIcons.fromArchive(installed.archive, installed.identity);
 
             held.at('finishing');
 
@@ -260,6 +308,7 @@ const createInstaller = ({ sdb, device, config, resigner, store, log }) => {
 
             return outcome;
         } catch (error) {
+            failure = error;
             say.err(`install failed after ${took(at())}: ${error.code || 'internal'} — ${error.message}`);
 
             if (error.remedy) error.remedy.split('\n').forEach((line) => say.warn(line));
@@ -272,6 +321,15 @@ const createInstaller = ({ sdb, device, config, resigner, store, log }) => {
 
             throw error;
         } finally {
+            // Left when the TV may still be installing it — the session dropped or timed out, so its outcome
+            // is unknown — and swept up later, once it is old enough that nothing can be reading it.
+            if (stagedPath && UNKNOWN_OUTCOME.indexOf(failure && failure.code) !== -1) {
+                say.info(`left the staged copy for the TV to finish with; it is removed later`);
+            } else if (stagedPath) {
+                if (installer.unstage(stagedPath)) say.debug(`removed the staged copy ${stagedPath}`);
+                else say.warn(`could not remove the staged copy ${stagedPath}`);
+            }
+
             const high = held.highest();
 
             if (high.at) {

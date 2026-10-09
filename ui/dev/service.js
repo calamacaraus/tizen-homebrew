@@ -153,6 +153,26 @@ const customizations = {};
 
 const RELEASED = { 'SushyDev/tizen-homebrew': '0.2.0', 'SushyDev/tube': '0.1.0' };
 
+// Where each stand-in app came from, as the real service records it; YouTube has none, as one installed
+// by an earlier Homebrew would.
+const ORIGINS = {
+    GJBBYNLkgP: { source: 'catalog', repository: 'official', repo: 'SushyDev/tizen-homebrew', asset: 'homebrew.wgt', tag: 'v0.1.0',
+        verified: true, at: '2026-10-08T20:10:00Z' },
+    AlphaApp01: { source: 'catalog', repository: COMMUNITY.id, asset: 'Alpha-Player.wgt',
+        verified: true, at: '2026-10-07T18:00:00Z' },
+    BravoTVapp: { source: 'url', host: 'github.com', verified: false, at: '2026-10-06T09:30:00Z' }
+};
+
+const OTHERS = [{ id: 'installed-dO0mG4me01', packageId: 'dO0mG4me01', name: 'Doom', installed: '1.0.0', unlisted: true,
+    source: { type: 'upload', ref: null },
+    origin: { source: 'upload', file: 'Doom.wgt', verified: false, at: '2026-10-08T19:00:00Z' } }];
+
+const withOrigin = (app) => ({ ...app, origin: app.installed ? ORIGINS[app.packageId] || null : null });
+
+const catalogMessage = (checked, extra = {}) => ({
+    entries: listed(checked), others: OTHERS, stale: false, ...extra
+});
+
 const listed = (checked) => CATALOG.map((app) => {
     const installed = INSTALLED[app.packageId] || null;
 
@@ -169,7 +189,7 @@ const listed = (checked) => CATALOG.map((app) => {
         update: Boolean(asked && installed && available && available > installed),
         rebuilt: false
     };
-}).concat(repositories.indexOf(COMMUNITY) === -1 ? [] : COLLECTED.map((app) => {
+}).map(withOrigin).concat(repositories.indexOf(COMMUNITY) === -1 ? [] : COLLECTED.map((app) => {
     const installed = app.packageId ? INSTALLED[app.packageId] || null : null;
 
     return {
@@ -180,7 +200,7 @@ const listed = (checked) => CATALOG.map((app) => {
         update: Boolean(installed && ((app.version && app.version > installed) || (!app.version && app.rebuiltFrom))),
         rebuilt: false
     };
-}));
+}).map(withOrigin));
 
 const repositoryList = () => [{ id: 'official', kind: 'catalog', ref: null, name: 'Tizen Homebrew', count: CATALOG.length, builtIn: true }]
     .concat(repositories.map((repository) => ({ ...repository, count: repository === COMMUNITY ? COLLECTED.length : 0, error: null })));
@@ -442,11 +462,11 @@ const conversation = (socket, say) => {
             send('state', DEVICE);
         },
 
-        getCatalog: () => send('catalog', { entries: listed(checked), stale: false, repositories: repositoryList() }),
+        getCatalog: () => send('catalog', catalogMessage(checked, { repositories: repositoryList() })),
 
         getRepositories: () => {
             send('repositories', { repositories: repositoryList() });
-            send('catalog', { entries: listed(checked), stale: false, repositories: repositoryList() });
+            send('catalog', catalogMessage(checked, { repositories: repositoryList() }));
         },
 
         addRepository: async ({ ref }) => {
@@ -538,13 +558,13 @@ const conversation = (socket, say) => {
             settings.lastResult = { available: [], updated: updated.slice(), failed: [] };
 
             tell({ running: false, index: queue.length, total: queue.length });
-            send('catalog', { entries: listed(checked), stale: false, repositories: repositoryList() });
+            send('catalog', catalogMessage(checked, { repositories: repositoryList() }));
         },
 
         checkUpdates: async ({ id }) => {
             const asking = CATALOG.filter((app) => app.source.type === 'github' && (!id || app.id === id));
 
-            if (!asking.length) return send('catalog', { entries: listed(checked), stale: false });
+            if (!asking.length) return send('catalog', catalogMessage(checked));
 
             log.info('cat', `checking ${asking.length === 1 ? asking[0].name : `${asking.length} apps`} for a newer release`);
 

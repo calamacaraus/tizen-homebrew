@@ -30,7 +30,7 @@ const Outbound = {
     HELLO: 'hello',                 // { ok, needsPin } — plus { pin, port, addresses, url, build } on loopback
     STATE: 'state',                 // DeviceState
     LOG: 'log',                     // { lines: [LogLine], uptime }
-    CATALOG: 'catalog',             // { entries: [CatalogEntry], stale, source, repositories }
+    CATALOG: 'catalog',             // { entries: [CatalogEntry], others: [installed, no list names it], stale, source, repositories }
     RELEASE: 'release',             // { repo, tag, publishedAt, assets: [{ name, size, sha256 }] }
     REPOSITORIES: 'repositories',   // { repositories: [Repository] }
     SETTINGS: 'settings',           // { autoUpdate, lastCheck, lastResult }

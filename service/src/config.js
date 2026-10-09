@@ -24,6 +24,7 @@ const DEFAULTS = {
     lastInstalled: [],
 
     repositories: [],        // added on the phone: { id, kind: 'catalog'|'github', ref, name, addedAt }
+    origins: {},             // package id -> where its last install came from, for the phone to show
     installedFrom: {},       // catalog entry id -> { packageId, version, sha256, at } for what this installed
 
     customizations: {},      // package id -> { name, icon: { type, file } , at } — the image in homebrewIcons/

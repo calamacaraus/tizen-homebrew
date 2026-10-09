@@ -76,6 +76,7 @@ const store = createStore({
 
     device: null,
     catalog: [],
+    others: [],
     catalogStale: false,
 
     checking: null,
@@ -180,6 +181,7 @@ const { send } = connect({
 
             catalog: () => ({
                 catalog: payload.entries || [],
+                others: payload.others || [],
                 catalogStale: !!payload.stale,
                 checking: null,
                 ...(payload.repositories ? { repositories: payload.repositories } : {})

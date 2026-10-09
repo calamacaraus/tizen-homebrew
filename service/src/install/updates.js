@@ -28,7 +28,7 @@ const askable = (entry) => entry.source.type === 'github' && !entry.collection;
 const comparable = (left, right) => Boolean(versions.parse(left) && versions.parse(right));
 
 // `packages` and the GitHub lookup are handed in so this can be exercised off a television.
-const createUpdates = ({ packages, log, config, latestRelease = sources.latestRelease }) => {
+const createUpdates = ({ packages, log, config, appIcons = null, latestRelease = sources.latestRelease }) => {
     const say = log ? log.on('cat') : quiet;
 
     // repo -> { version, at }. A remembered null is "asked, told nothing", not "never asked".
@@ -37,6 +37,16 @@ const createUpdates = ({ packages, log, config, latestRelease = sources.latestRe
     const fresh = (repo) => {
         const known = remembered[repo];
         return known && Date.now() - known.at < CACHE_TTL ? known : null;
+    };
+
+    // Package id -> where the set says its icon is, from the same listing.
+    const iconPaths = {};
+
+    // The phone's picture for an installed app: the one this service kept, or one read off the set now.
+    const iconFor = (packageId, fallback) => {
+        if (!appIcons || !packageId) return fallback || null;
+        if (!appIcons.has(packageId)) appIcons.fromTv(packageId, iconPaths[packageId]);
+        return appIcons.urlOf(packageId) || fallback || null;
     };
 
     // Package id -> installed version, kept because getPackagesInfo takes six seconds on a full set.
@@ -63,6 +73,11 @@ const createUpdates = ({ packages, log, config, latestRelease = sources.latestRe
                     byId[entry.id] = entry.version || UNKNOWN_VERSION;
                     return byId;
                 }, {});
+
+                list.forEach((entry) => { if (entry.iconPath) iconPaths[entry.id] = entry.iconPath; });
+
+                // Icons of apps no longer on the set go with them.
+                if (appIcons && list.length) appIcons.prune(list.map((entry) => entry.id));
 
                 // Fills in versions this service wrote down itself; only ever overwrites a `?`.
                 (config ? config.read().lastInstalled || [] : []).forEach((seen) => {
@@ -116,6 +131,26 @@ const createUpdates = ({ packages, log, config, latestRelease = sources.latestRe
     // entry cannot know before its first install, and the sha256 of the file it came from.
     const learned = () => (config ? config.read().installedFrom || {} : {});
 
+    // Installed by 0.3.x, before origins were kept: its list entry's record still says which list it was.
+    const recalled = (entry, memo, packageId) => (memo && memo.packageId === packageId ? {
+        source: 'catalog', entry: entry.id, repository: entry.repository || 'official',
+        repo: entry.source && entry.source.type === 'github' ? entry.source.ref : null,
+        asset: entry.collection ? entry.source.asset : null,
+        verified: false, at: memo.at || null, recalled: true
+    } : null);
+
+    // An origin describes the copy it installed. One the TV now holds at another version came some other way
+    // since — the laptop, the store — so its file, date and checksum no longer describe what is there.
+    const asHeld = (origin, installedVersion) => {
+        if (!origin) return null;
+        if (origin.version && installedVersion && installedVersion !== UNKNOWN_VERSION && origin.version !== installedVersion) {
+            return { ...origin, verified: false, replaced: true };
+        }
+        return origin;
+    };
+
+    const originsKept = () => (config ? config.read().origins || {} : {});
+
     // `checked` separates "not asked yet" from "asked, and there are no releases".
     //
     // `update` is a newer version, or — when there is no version to compare, as with a collection file
@@ -124,6 +159,7 @@ const createUpdates = ({ packages, log, config, latestRelease = sources.latestRe
     const mark = async (entries) => {
         const installed = await installedNow();
         const memory = learned();
+        const origins = originsKept();
 
         return entries.map((entry) => {
             const memo = memory[entry.id] || null;
@@ -150,6 +186,8 @@ const createUpdates = ({ packages, log, config, latestRelease = sources.latestRe
                 packageId,
                 version: available || entry.version,
                 installed: current,
+                origin: current && packageId ? asHeld(origins[packageId], current) || recalled(entry, memo, packageId) : null,
+                icon: current ? iconFor(packageId, entry.icon) : entry.icon || null,
                 available,
                 checked: Boolean(known),
                 update,
@@ -220,7 +258,34 @@ const createUpdates = ({ packages, log, config, latestRelease = sources.latestRe
         return marked;
     };
 
-    return { mark, check, prime, changed };
+    // Apps this service installed that no list names — an upload, a URL, the GitHub tab, a USB stick — and
+    // that are still on the television, so the phone can show them with the rest of what is installed.
+    const others = async (entries) => {
+        const installed = await installedNow();
+        const memory = learned();
+        const origins = originsKept();
+
+        const listed = {};
+        entries.forEach((entry) => {
+            const packageId = entry.packageId || (memory[entry.id] && memory[entry.id].packageId);
+            if (packageId) listed[packageId] = true;
+        });
+
+        return Object.keys(origins)
+            .filter((packageId) => !listed[packageId] && installed[packageId])
+            .map((packageId) => ({
+                id: `installed-${packageId}`,
+                packageId,
+                name: origins[packageId].name || packageId,
+                installed: installed[packageId] === UNKNOWN_VERSION ? origins[packageId].version || installed[packageId] : installed[packageId],
+                origin: asHeld(origins[packageId], installed[packageId]),
+                icon: iconFor(packageId, null),
+                unlisted: true,
+                source: { type: origins[packageId].source || 'upload', ref: origins[packageId].repo || origins[packageId].host || null }
+            }));
+    };
+
+    return { mark, check, others, prime, changed };
 };
 
 module.exports = { createUpdates, CACHE_TTL, AT_ONCE, INSTALLED_TTL };

@@ -233,6 +233,15 @@ p { margin: 0; }
   gap: 0.5rem;
 }
 
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 0 -0.5rem -0.5rem 0;
+
+  & > * { margin: 0 0.5rem 0.5rem 0; }
+}
+
 .controls {
   display: grid;
   grid-auto-flow: column;

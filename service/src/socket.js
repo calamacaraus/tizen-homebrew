@@ -205,6 +205,7 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
             // Marked from the kept listing rather than by asking the set, so the list draws now.
             send(Outbound.CATALOG, {
                 entries: await updates.mark(result.entries),
+                others: await updates.others(result.entries),
                 stale: result.stale,
                 source: result.source,
                 repositories: result.repositories || []
@@ -223,6 +224,7 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
 
             send(Outbound.CATALOG, {
                 entries: await updates.check(entries, { id: id || null }),
+                others: await updates.others(entries),
                 stale: Boolean(store.select('catalogStale')),
                 source: 'cache',
                 repositories: result ? result.repositories : undefined
