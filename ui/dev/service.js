@@ -149,6 +149,8 @@ const settings = { autoUpdate: 'check', lastCheck: new Date(Date.now() - 3 * 360
 // Every paired screen, for what all of them hear at once.
 const everyone = new Set();
 
+const customizations = {};
+
 const RELEASED = { 'SushyDev/tizen-homebrew': '0.2.0', 'SushyDev/tube': '0.1.0' };
 
 const listed = (checked) => CATALOG.map((app) => {
@@ -252,13 +254,16 @@ const frame = (text) => {
     return Buffer.concat([header, payload]);
 };
 
-const unframe = (buffer) => {
+// `partial` carries a message split across frames (FIN clear, then continuations) from one call to the next:
+// a browser splits a large one, such as a custom icon.
+const unframe = (buffer, partial = { parts: null }) => {
     const messages = [];
     let offset = 0;
 
     for (;;) {
         if (buffer.length - offset < 2) break;
 
+        const fin = (buffer[offset] & 0x80) !== 0;
         const opcode = buffer[offset] & 0x0f;
         const masked = (buffer[offset + 1] & 0x80) !== 0;
         let length = buffer[offset + 1] & 0x7f;
@@ -285,7 +290,15 @@ const unframe = (buffer) => {
         offset = cursor + length;
 
         if (opcode === 0x08) return { messages, rest: buffer.slice(offset), closed: true };
-        if (opcode === 0x01) messages.push(payload.toString('utf8'));
+
+        if (opcode === 0x01 || (opcode === 0x00 && partial.parts)) {
+            partial.parts = (opcode === 0x01 ? [] : partial.parts).concat(payload);
+
+            if (fin) {
+                messages.push(Buffer.concat(partial.parts).toString('utf8'));
+                partial.parts = null;
+            }
+        }
     }
 
     return { messages, rest: buffer.slice(offset), closed: false };
@@ -471,6 +484,32 @@ const conversation = (socket, say) => {
 
         getSettings: () => send('settings', settings),
 
+        getCustomizations: () => send('customizations', { items: customizations }),
+
+        setCustomization: async (payload) => {
+            const { packageId } = payload;
+
+            if (payload.reset) {
+                delete customizations[packageId];
+            } else {
+                const previous = customizations[packageId] || {};
+                customizations[packageId] = {
+                    name: 'name' in payload ? payload.name : previous.name || null,
+                    icon: payload.icon ? `data:${payload.icon.type};base64,${payload.icon.data}` : previous.icon || null
+                };
+            }
+
+            log.info('sock', `192.168.2.31 ${payload.reset ? 'reset' : 'customised'} ${packageId}`);
+            everyone.forEach((to) => to('customizations', { items: { [packageId]: customizations[packageId] || null }, partial: true }));
+
+            if (!payload.apply) return;
+
+            const entry = listed(checked).find((app) => app.packageId === packageId);
+            if (!entry) return fail('savedNotApplied', 'This app was not installed from a list Homebrew can fetch again.');
+
+            await install({ source: 'catalog', ref: entry.id });
+        },
+
         setSettings: ({ autoUpdate }) => {
             if (autoUpdate) settings.autoUpdate = autoUpdate;
             log.info('sock', `192.168.2.31 set automatic updates to ${autoUpdate}`);
@@ -630,10 +669,12 @@ const devService = ({ enabled }) => ({
             const handle = conversation(socket, say);
             let pending = Buffer.alloc(0);
 
+            const partial = { parts: null };
+
             socket.on('data', (chunk) => {
                 pending = Buffer.concat([pending, chunk]);
 
-                const { messages, rest, closed } = unframe(pending);
+                const { messages, rest, closed } = unframe(pending, partial);
                 pending = rest;
 
                 messages.forEach(handle);

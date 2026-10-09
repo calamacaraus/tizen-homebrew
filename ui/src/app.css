@@ -1094,3 +1094,10 @@ p { margin: 0; }
     animation-duration: 1ms !important;
   }
 }
+
+/* A one-glyph button beside a row's actions, so the name keeps its room. */
+.btn-icon {
+  min-width: 0;
+  padding-left: 0.7rem;
+  padding-right: 0.7rem;
+}

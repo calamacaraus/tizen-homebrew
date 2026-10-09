@@ -17,6 +17,8 @@ const Inbound = {
     REMOVE_REPOSITORY: 'removeRepository', // { id }
     GET_SETTINGS: 'getSettings',    // -
     SET_SETTINGS: 'setSettings',    // { autoUpdate?: 'off'|'check'|'install' }
+    GET_CUSTOMIZATIONS: 'getCustomizations', // -
+    SET_CUSTOMIZATION: 'setCustomization',   // { packageId, name?, icon?: { type, data }, reset?, apply? }
     LIST_DIR: 'listDir',            // { path }
     SUBMIT_ACCESS_INFO: 'submitAccessInfo', // { accessToken, userId, email }
     FORGET_CERTS: 'forgetCerts',    // -
@@ -33,6 +35,7 @@ const Outbound = {
     REPOSITORIES: 'repositories',   // { repositories: [Repository] }
     SETTINGS: 'settings',           // { autoUpdate, lastCheck, lastResult }
     UPDATE_RUN: 'updateRun',        // { running, index, total, current?, updated: [], failed: [], trigger }
+    CUSTOMIZATIONS: 'customizations', // { items: { [packageId]: { name, icon (data URI) } } }
     PROGRESS: 'progress',           // { phase, detail?, identity? }
     DONE: 'done',                   // { packageId, appId }
     ERROR: 'error',                 // { code, message, remedy?, fatal }
@@ -78,7 +81,8 @@ const ErrorCode = {
 
     CHECKSUM_MISMATCH: 'checksumMismatch',
     TOO_LARGE: 'tooLarge',
-    BUSY: 'busy'
+    BUSY: 'busy',
+    SAVED_NOT_APPLIED: 'savedNotApplied'
 };
 
 function ProtocolError(code, message) {
@@ -140,6 +144,22 @@ function parse(raw) {
 
     if (msg.type === Inbound.REMOVE_REPOSITORY && !shortString(payload.id)) {
         throw ProtocolError(ErrorCode.BAD_MESSAGE, 'removeRepository requires the id of one repository.');
+    }
+
+    if (msg.type === Inbound.SET_CUSTOMIZATION) {
+        if (!shortString(payload.packageId)) throw ProtocolError(ErrorCode.BAD_MESSAGE, 'setCustomization needs a packageId.');
+        if ('name' in payload && payload.name !== null && (typeof payload.name !== 'string' || payload.name.length > 200)) {
+            throw ProtocolError(ErrorCode.BAD_MESSAGE, 'A name is a short string, or null.');
+        }
+        if ('icon' in payload && payload.icon !== null &&
+            (typeof payload.icon !== 'object' || typeof payload.icon.type !== 'string' || typeof payload.icon.data !== 'string')) {
+            throw ProtocolError(ErrorCode.BAD_MESSAGE, 'An icon is { type, data }, or null.');
+        }
+        ['reset', 'apply'].forEach((flag) => {
+            if (flag in payload && typeof payload[flag] !== 'boolean') {
+                throw ProtocolError(ErrorCode.BAD_MESSAGE, `${flag} is a boolean.`);
+            }
+        });
     }
 
     if (msg.type === Inbound.UPDATE_ALL && 'includeRebuilt' in payload && typeof payload.includeRebuilt !== 'boolean') {

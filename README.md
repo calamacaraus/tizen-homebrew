@@ -301,6 +301,12 @@ name where it has one (`Alpha-1.0.46.wgt`); where it has none (`Bravo.wgt`), a
 file whose sha256 differs from the installed one is the update. A different file
 at the *same* version is a **rebuild**: offered, never installed unasked.
 
+**Your own name and icon.** The pencil beside an installed app sets a name and
+a picture for it on the TV's home row (fitted to 512×512 on the phone). They are
+kept by package id and written into the package before it is re-signed, so every
+install and update of that app keeps them, wherever it comes from. **save &
+reinstall** applies them now; **reset** goes back to the app's own.
+
 **Checksums.** GitHub publishes a sha256 for every release asset, and a catalog
 entry may state `sha256` itself. A download that does not match is refused before
 anything opens it.

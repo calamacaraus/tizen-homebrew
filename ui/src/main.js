@@ -24,7 +24,9 @@ const Send = {
     addRepository: 'addRepository',
     removeRepository: 'removeRepository',
     settings: 'getSettings',
-    setSettings: 'setSettings'
+    setSettings: 'setSettings',
+    customizations: 'getCustomizations',
+    setCustomization: 'setCustomization'
 };
 
 // Titles only: what to do about a failure arrives with it as `remedy`. A code with no entry here renders as a
@@ -55,7 +57,8 @@ const EXPLANATIONS = {
 
     checksumMismatch: 'The download is not the file that was published.',
     tooLarge: 'That package is too large to install.',
-    busy: 'Something is already installing.'
+    busy: 'Something is already installing.',
+    savedNotApplied: 'Saved. Homebrew cannot fetch this app again by itself — install it once more (its row on the apps tab, or where it came from) and the change shows.'
 };
 
 const known = remembered();
@@ -84,6 +87,17 @@ const store = createStore({
 
     release: null,
     releaseLoading: false,
+
+    // packageId -> { name, icon (data URI) }, and the app being edited with what has been chosen so far.
+    customizations: {},
+    customizing: null,
+    customIcon: null,
+    customBusy: false,
+    customClosing: false,
+
+    // Typed into, never painted from: a repaint per keystroke would take the field and its focus with it.
+    // Read when something else repaints the panel (choosing an icon), so what was typed survives.
+    customDraft: { name: '' },
 
     tab: 'catalog',
     github: '',
@@ -177,6 +191,22 @@ const { send } = connect({
 
             settings: () => ({ settings: payload }),
 
+            customizations: () => {
+                const items = payload.partial ? { ...store.get().customizations, ...payload.items } : { ...(payload.items || {}) };
+                Object.keys(items).forEach((id) => { if (!items[id]) delete items[id]; });
+
+                // A plain save closes its panel once the service confirms that app — not on another phone's save
+                // or a reconnect's full list; a refusal arrives as an error instead.
+                const { customClosing, customizing } = store.get();
+                const closing = customClosing && payload.partial && customizing && customizing in (payload.items || {});
+
+                return {
+                    customizations: items,
+                    ...(closing ? { customizing: null, customIcon: null, customClosing: false, customBusy: false } : {}),
+                    ...(payload.partial && customizing in (payload.items || {}) ? { customBusy: false } : {})
+                };
+            },
+
             // Every screen hears a run, whoever started it; the list is asked for again once it ends.
             updateRun: () => {
                 if (!payload.running) send(Send.catalog, {});
@@ -204,7 +234,15 @@ const { send } = connect({
                 done: null
             }),
 
-            done: () => ({ phase: null, phaseDetail: null, done: payload, error: null }),
+            // Only the install of the app being edited closes its panel; update all finishing others leaves it.
+            done: () => ({
+                phase: null,
+                phaseDetail: null,
+                done: payload,
+                error: null,
+                ...(store.get().customizing && store.get().customizing === payload.packageId
+                    ? { customizing: null, customIcon: null } : {})
+            }),
 
             error: () => {
                 // Before pairing the PIN field is all there is, so a lockout — reported as an error rather
@@ -226,6 +264,9 @@ const { send } = connect({
                     checking: null,
                     repoBusy: false,
                     releaseLoading: false,
+                    customBusy: false,
+                    // A refused save keeps its panel, and the picture chosen in it, open to try again.
+                    customClosing: false,
                     // Set before the service answered; a refusal is the answer, so the banner lets go.
                     updateRun: run && run.running && !run.total ? null : run,
                     error: {
@@ -246,6 +287,7 @@ const { send } = connect({
             send(Send.catalog, {});
             send(Send.state, {});
             send(Send.settings, {});
+            send(Send.customizations, {});
         }
     }
 });
@@ -274,6 +316,87 @@ const chooseFile = async (file) => {
     if (store.get().file !== file) return;
 
     store.update({ identity: app, reading: false });
+};
+
+// Any picture becomes a 512×512 PNG with its proportions kept and the rest transparent: what the television
+// draws a tile from, and small enough to travel over the socket.
+const ICON_SIDE = 512;
+
+// Under the service's 384KB, with room to spare.
+const ICON_LIMIT = 360 * 1024;
+
+const bytesOf = (dataUri) => Math.floor((dataUri.length - dataUri.indexOf(',') - 1) * 3 / 4);
+
+const toIcon = (file) => new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = document.createElement('img');
+
+    image.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = ICON_SIDE;
+        canvas.height = ICON_SIDE;
+
+        const scale = Math.min(ICON_SIDE / image.naturalWidth, ICON_SIDE / image.naturalHeight);
+        const width = Math.round(image.naturalWidth * scale);
+        const height = Math.round(image.naturalHeight * scale);
+
+        canvas.getContext('2d').drawImage(image, (ICON_SIDE - width) / 2, (ICON_SIDE - height) / 2, width, height);
+        URL.revokeObjectURL(url);
+
+        // A logo is a few dozen kilobytes as PNG; a photo can be a megabyte, which the TV refuses. Past the
+        // limit it becomes a JPEG on white — a photo has no transparency to lose — at falling quality.
+        const png = canvas.toDataURL('image/png');
+        if (bytesOf(png) <= ICON_LIMIT) return resolve(png);
+
+        const flat = document.createElement('canvas');
+        flat.width = ICON_SIDE;
+        flat.height = ICON_SIDE;
+
+        const context = flat.getContext('2d');
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, ICON_SIDE, ICON_SIDE);
+        context.drawImage(canvas, 0, 0);
+
+        const fitted = [0.9, 0.8, 0.7, 0.55]
+            .map((quality) => flat.toDataURL('image/jpeg', quality))
+            .find((candidate) => bytesOf(candidate) <= ICON_LIMIT);
+
+        if (fitted) return resolve(fitted);
+
+        reject(new Error('That picture is too detailed to use as an icon, even shrunk; try a simpler one.'));
+    };
+
+    image.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error('That file is not a picture this phone can open.'));
+    };
+
+    image.src = url;
+});
+
+const iconPayload = (dataUri) => {
+    const comma = dataUri.indexOf(',');
+    return { type: dataUri.slice(5, dataUri.indexOf(';')), data: dataUri.slice(comma + 1) };
+};
+
+const saveCustomization = (apply) => {
+    const { customizing, customIcon } = store.get();
+    if (!customizing) return;
+
+    const typed = value('cname');
+    const payload = { packageId: customizing, name: typed || null, apply };
+
+    if (customIcon) payload.icon = iconPayload(customIcon);
+
+    store.update({
+        customBusy: true,
+        customClosing: !apply,
+        error: null,
+        done: null,
+        ...(apply ? { phase: 'probing', identity: null } : {})
+    });
+
+    send(Send.setCustomization, payload);
 };
 
 delegate({
@@ -343,6 +466,40 @@ delegate({
     },
 
     auto: (_element, mode) => send(Send.setSettings, { autoUpdate: mode }),
+
+    // `customize:<packageId>`, from a row of the apps list.
+    customize: (_element, packageId) => {
+        const kept = store.get().customizations[packageId];
+        store.update({ customizing: packageId, customIcon: null, error: null, customDraft: { name: (kept && kept.name) || '' } });
+    },
+
+    cname: (element) => {
+        store.get().customDraft.name = element.value;
+    },
+
+    customIcon: async (element) => {
+        const file = element.files && element.files[0];
+        if (!file) return;
+
+        try {
+            store.update({ customIcon: await toIcon(file) });
+        } catch (failure) {
+            store.update({ error: { title: 'That picture could not be used.', detail: failure.message, remedy: null } });
+        }
+    },
+
+    'custom:save': () => saveCustomization(false),
+    'custom:apply': () => saveCustomization(true),
+
+    'custom:reset': () => {
+        const { customizing } = store.get();
+        if (!customizing) return;
+
+        store.update({ customBusy: true, customizing: null, customIcon: null });
+        send(Send.setCustomization, { packageId: customizing, reset: true });
+    },
+
+    'custom:close': () => store.update({ customizing: null, customIcon: null }),
 
     updateAll: () => {
         if (store.get().updateRun && store.get().updateRun.running) return;

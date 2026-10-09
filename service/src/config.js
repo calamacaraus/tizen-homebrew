@@ -26,6 +26,8 @@ const DEFAULTS = {
     repositories: [],        // added on the phone: { id, kind: 'catalog'|'github', ref, name, addedAt }
     installedFrom: {},       // catalog entry id -> { packageId, version, sha256, at } for what this installed
 
+    customizations: {},      // package id -> { name, icon: { type, file } , at } — the image in homebrewIcons/
+
     autoUpdate: 'check',     // 'off' | 'check' — look daily and say so | 'install' — and install what is newer
     lastUpdateCheck: null,   // ISO time of the last automatic or asked-for check
     lastUpdateResult: null   // { available: [names], updated: [names], failed: [names] }
@@ -134,6 +136,7 @@ module.exports = {
     adoptHandoff,
     forgetCertificates,
     clear,
+    CONFIG_DIR,
     CONFIG_PATH,
     HANDOFF_PATH,
     DEFAULTS
