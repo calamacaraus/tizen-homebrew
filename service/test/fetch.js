@@ -78,6 +78,69 @@ const main = async () => {
         held.forEach((request) => request.destroy());
     }
 
+    {
+        const { server, port } = await listen((request, response) => {
+            if (request.url === '/declared') {
+                response.writeHead(200, { 'content-length': String(10 * 1024) });
+                return response.end(Buffer.alloc(10 * 1024));
+            }
+
+            // No length declared: only counting what arrives can stop it.
+            response.write(Buffer.alloc(8 * 1024));
+            response.end(Buffer.alloc(8 * 1024));
+        });
+
+        const declared = await fetch.getBuffer(`http://127.0.0.1:${port}/declared`, { maxBytes: 4096 })
+            .then(() => null, (failure) => failure);
+
+        check('a body declared over the limit is refused before it is read',
+            declared && declared.code === 'tooLarge', declared && declared.message);
+
+        const streamed = await fetch.getBuffer(`http://127.0.0.1:${port}/streamed`, { maxBytes: 4096 })
+            .then(() => null, (failure) => failure);
+
+        check('and one that only turns out to be too large is stopped as it arrives',
+            streamed && streamed.code === 'tooLarge', streamed && streamed.message);
+
+        const fits = await fetch.getBuffer(`http://127.0.0.1:${port}/declared`, { maxBytes: 64 * 1024 });
+
+        check('while a body under the limit arrives whole', fits.length === 10 * 1024, String(fits.length));
+
+        server.close();
+    }
+
+    {
+        const { server, port } = await listen((request, response) => {
+            response.writeHead(302, { location: `http://127.0.0.1:${port}/plain` });
+            response.end();
+        });
+
+        const refused = await fetch.request(`http://127.0.0.1:${port}/`, { httpsOnly: true })
+            .then(() => null, (failure) => failure);
+
+        check('a download held to https is not followed anywhere in the clear',
+            refused && /only https/.test(refused.message), refused && refused.message);
+
+        server.close();
+    }
+
+    {
+        const { server, port } = await listen((request, response) => {
+            response.writeHead(200, { 'content-length': '5000' });
+            response.write(Buffer.alloc(1000));
+            setTimeout(() => response.socket.destroy(), 20);
+        });
+
+        const cut = await fetch.getBuffer(`http://127.0.0.1:${port}/`)
+            .then((body) => ({ body }), (failure) => ({ failure }));
+
+        check('a download the server cuts short is a failure, not a short package',
+            cut.failure && /cut off|stopped at|Response failed|ECONNRESET/.test(cut.failure.message),
+            cut.failure ? cut.failure.message : `resolved with ${cut.body.length} bytes`);
+
+        server.close();
+    }
+
     http.request = realRequest;
 
     const failed = results.filter((ok) => !ok).length;

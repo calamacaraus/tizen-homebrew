@@ -21,7 +21,14 @@ const DEFAULTS = {
     certDuids: null,         // every DUID they name — `--duidList` is a list
     certCreatedAt: null,
     catalogUrl: null,        // overrides the built-in origin when set
-    lastInstalled: []
+    lastInstalled: [],
+
+    repositories: [],        // added on the phone: { id, kind: 'catalog'|'github', ref, name, addedAt }
+    installedFrom: {},       // catalog entry id -> { packageId, version, sha256, at } for what this installed
+
+    autoUpdate: 'check',     // 'off' | 'check' — look daily and say so | 'install' — and install what is newer
+    lastUpdateCheck: null,   // ISO time of the last automatic or asked-for check
+    lastUpdateResult: null   // { available: [names], updated: [names], failed: [names] }
 };
 
 function read() {
@@ -38,7 +45,8 @@ function read() {
 function write(config) {
     if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR);
         const tmp = `${CONFIG_PATH}.tmp`;
-    writeFileSync(tmp, JSON.stringify(config, null, 4));
+    // The private signing keys live in this file, so it is readable by its owner and nobody else.
+    writeFileSync(tmp, JSON.stringify(config, null, 4), { mode: 0o600 });
     renameSync(tmp, CONFIG_PATH);
     return config;
 }

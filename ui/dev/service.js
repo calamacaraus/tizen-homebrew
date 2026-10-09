@@ -111,7 +111,43 @@ const CATALOG = [
     }
 ];
 
-const INSTALLED = { GJBBYNLkgP: '0.1.0', tUb3Xq7Lm9: '0.1.0' };
+const INSTALLED = { GJBBYNLkgP: '0.1.0', tUb3Xq7Lm9: '0.1.0', AlphaApp01: '1.0.45', BravoTVapp: '0.16.72' };
+
+const SHA = (letter) => new Array(65).join(letter);
+
+// A collection as the real service builds it from a release listing: names, files and digests.
+const COMMUNITY = {
+    id: 'gh-example-tv-packages',
+    kind: 'github',
+    ref: 'example/tv-packages',
+    name: 'example/tv-packages'
+};
+
+const COLLECTED = [
+    { key: 'alpha', name: 'Alpha', file: 'Alpha-1.0.46.wgt', version: '1.0.46', packageId: 'AlphaApp01', sha: 'a' },
+    { key: 'bravo', name: 'Bravo', file: 'Bravo.wgt', version: null, packageId: 'BravoTVapp', sha: 'b', rebuiltFrom: 'f' },
+    { key: 'charlie', name: 'Charlie', file: 'Charlie.wgt', version: null, packageId: null, sha: 'c' },
+    { key: 'echo-tizen', name: 'echo tizen', file: 'echo-tizen-v0.2.0-unsigned.wgt', version: '0.2.0', packageId: null, sha: 'd' }
+].map((app) => ({
+    id: `${COMMUNITY.id}.${app.key}`,
+    name: app.name,
+    description: `${app.file} · ${COMMUNITY.ref} · community-550`,
+    version: app.version,
+    packageId: app.packageId,
+    sha256: SHA(app.sha),
+    collection: true,
+    repository: COMMUNITY.id,
+    icon: null,
+    rebuiltFrom: app.rebuiltFrom || null,
+    source: { type: 'github', ref: COMMUNITY.ref, asset: app.file, exact: true }
+}));
+
+const repositories = [COMMUNITY];
+
+const settings = { autoUpdate: 'check', lastCheck: new Date(Date.now() - 3 * 3600 * 1000).toISOString(), lastResult: null };
+
+// Every paired screen, for what all of them hear at once.
+const everyone = new Set();
 
 const RELEASED = { 'SushyDev/tizen-homebrew': '0.2.0', 'SushyDev/tube': '0.1.0' };
 
@@ -123,13 +159,39 @@ const listed = (checked) => CATALOG.map((app) => {
 
     return {
         ...app,
+        repository: 'official',
         version: (asked ? available : null) || app.version || null,
         installed,
         available: asked ? available : null,
         checked: asked,
-        update: Boolean(asked && installed && available && available > installed)
+        update: Boolean(asked && installed && available && available > installed),
+        rebuilt: false
     };
-});
+}).concat(repositories.indexOf(COMMUNITY) === -1 ? [] : COLLECTED.map((app) => {
+    const installed = app.packageId ? INSTALLED[app.packageId] || null : null;
+
+    return {
+        ...app,
+        installed,
+        available: app.version,
+        checked: true,
+        update: Boolean(installed && ((app.version && app.version > installed) || (!app.version && app.rebuiltFrom))),
+        rebuilt: false
+    };
+}));
+
+const repositoryList = () => [{ id: 'official', kind: 'catalog', ref: null, name: 'Tizen Homebrew', count: CATALOG.length, builtIn: true }]
+    .concat(repositories.map((repository) => ({ ...repository, count: repository === COMMUNITY ? COLLECTED.length : 0, error: null })));
+
+const RELEASES = {
+    'example/charlie-tizen': {
+        repo: 'example/charlie-tizen', tag: 'v1.17.2', publishedAt: '2026-10-01T10:00:00Z',
+        assets: [
+            { name: 'Charlie-ForceGM.wgt', size: 2349650, sha256: SHA('e') },
+            { name: 'Charlie.wgt', size: 2349660, sha256: SHA('c') }
+        ]
+    }
+};
 
 const PACKAGES = {
     '/media/usb1/YouTube.wgt': {
@@ -346,6 +408,8 @@ const conversation = (socket, say) => {
             }
 
             paired = true;
+            everyone.add(send);
+            socket.on('close', () => everyone.delete(send));
             say('paired');
             log.ok('auth', '192.168.2.31 paired');
             send('hello', { ok: true, needsPin: false });
@@ -365,7 +429,78 @@ const conversation = (socket, say) => {
             send('state', DEVICE);
         },
 
-        getCatalog: () => send('catalog', { entries: listed(checked), stale: false }),
+        getCatalog: () => send('catalog', { entries: listed(checked), stale: false, repositories: repositoryList() }),
+
+        getRepositories: () => {
+            send('repositories', { repositories: repositoryList() });
+            send('catalog', { entries: listed(checked), stale: false, repositories: repositoryList() });
+        },
+
+        addRepository: async ({ ref }) => {
+            await new Promise((resolve) => setTimeout(resolve, 600));
+
+            if (repositories.indexOf(COMMUNITY) === -1 && /tizen-community-packages/.test(ref)) {
+                repositories.push(COMMUNITY);
+                log.ok('cat', `added the collection ${COMMUNITY.ref} — ${COLLECTED.length} apps`);
+            } else {
+                return fail('notFound', `The newest release of ${ref} has no .wgt or .tpk files.`);
+            }
+
+            handlers.getRepositories();
+        },
+
+        removeRepository: ({ id }) => {
+            const at = repositories.findIndex((repository) => repository.id === id);
+            if (at === -1) return fail('notFound', 'No repository with that id.');
+
+            log.info('cat', `removed ${repositories[at].ref}`);
+            repositories.splice(at, 1);
+            handlers.getRepositories();
+        },
+
+        listRelease: async ({ ref }) => {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+
+            const repo = String(ref).replace(/^https?:\/\/(www\.)?github\.com\//, '').split('/').slice(0, 2).join('/');
+            const release = RELEASES[repo];
+
+            if (!release) return fail('notFound', `${repo} has no published releases, or is private.`);
+
+            send('release', release);
+        },
+
+        getSettings: () => send('settings', settings),
+
+        setSettings: ({ autoUpdate }) => {
+            if (autoUpdate) settings.autoUpdate = autoUpdate;
+            log.info('sock', `192.168.2.31 set automatic updates to ${autoUpdate}`);
+            everyone.forEach((to) => to('settings', settings));
+        },
+
+        updateAll: async () => {
+            const queue = listed(checked).filter((app) => app.update);
+            const updated = [];
+            const tell = (state) => everyone.forEach((to) => to('updateRun', { trigger: 'asked', updated, failed: [], ...state }));
+
+            log.info('upd', queue.length ? `${queue.length} to update — ${queue.map((app) => app.name).join(', ')}` : 'everything is up to date');
+
+            for (let index = 0; index < queue.length; index += 1) {
+                tell({ running: true, index, total: queue.length, current: queue[index].name });
+                await new Promise((resolve) => setTimeout(resolve, 1500));
+
+                INSTALLED[queue[index].packageId] = queue[index].available || queue[index].installed;
+                if (queue[index].rebuiltFrom) COLLECTED.find((app) => app.id === queue[index].id).rebuiltFrom = null;
+
+                updated.push(queue[index].name);
+                log.ok('upd', `updated ${queue[index].name}`);
+            }
+
+            settings.lastCheck = new Date().toISOString();
+            settings.lastResult = { available: [], updated: updated.slice(), failed: [] };
+
+            tell({ running: false, index: queue.length, total: queue.length });
+            send('catalog', { entries: listed(checked), stale: false, repositories: repositoryList() });
+        },
 
         checkUpdates: async ({ id }) => {
             const asking = CATALOG.filter((app) => app.source.type === 'github' && (!id || app.id === id));

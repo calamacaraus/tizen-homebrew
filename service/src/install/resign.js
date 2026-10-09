@@ -54,14 +54,62 @@ const deviceOf = (certificates) => devicesOf(certificates)[0] || null;
 const resign = async (archive, certificates) => {
     const refuse = (message) => Object.assign(new Error(message), { code: 'resignFailed' });
 
+    // Each file is inflated as a stream and stopped once it passes the size its archive declared for it, so a
+    // package whose sizes lie (a zip bomb) costs at most what it claimed — which pipeline.js has already held
+    // to a total — rather than whatever the data expands to. Where JSZip does not expose the declared size,
+    // the read is as it always was.
+    const readBounded = (file, name) => {
+        const declared = file._data && typeof file._data.uncompressedSize === 'number' ? file._data.uncompressedSize : null;
+
+        if (declared === null || typeof file.internalStream !== 'function') return file.async('nodebuffer');
+
+        return new Promise((resolve, reject) => {
+            const chunks = [];
+            let received = 0;
+            let settled = false;
+
+            const stream = file.internalStream('nodebuffer');
+
+            stream.on('data', (chunk) => {
+                if (settled) return;
+                received += chunk.length;
+
+                if (received > declared) {
+                    settled = true;
+                    stream.pause();
+                    reject(refuse(`${name} inflates past the ${declared} bytes its archive declares — refusing a damaged or hostile package.`));
+                    return;
+                }
+
+                chunks.push(Buffer.from(chunk));
+            });
+
+            stream.on('error', (error) => {
+                if (settled) return;
+                settled = true;
+                reject(error);
+            });
+
+            stream.on('end', () => {
+                if (settled) return;
+                settled = true;
+                resolve(Buffer.concat(chunks));
+            });
+
+            stream.resume();
+        });
+    };
+
     // The URIs are percent-encoded, so a separator becomes `%2F` and is decoded back on the way out.
+    // One file at a time, so at most one is being inflated whatever the package holds.
     const contentsOf = async (zip) => {
-        const named = await Promise.all(Object.keys(zip.files)
-            .filter((name) => !zip.files[name].dir && !SIGNATURE_FILE.test(name))
-            .map(async (name) => ({
-                uri: encodeURIComponent(name),
-                data: await zip.files[name].async('nodebuffer')
-            })));
+        const named = [];
+
+        for (const name of Object.keys(zip.files)) {
+            if (zip.files[name].dir || SIGNATURE_FILE.test(name)) continue;
+
+            named.push({ uri: encodeURIComponent(name), data: await readBounded(zip.files[name], name) });
+        }
 
         if (!named.some((file) => MANIFESTS.indexOf(decodeURIComponent(file.uri)) !== -1)) {
             throw refuse('That package has no config.xml or tizen-manifest.xml, so it is not a Tizen package.');

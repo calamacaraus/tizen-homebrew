@@ -17,7 +17,14 @@ const Send = {
     install: 'install',
     listDir: 'listDir',
     setRelay: 'setRelay',
-    relayExec: 'relayExec'
+    relayExec: 'relayExec',
+    updateAll: 'updateAll',
+    listRelease: 'listRelease',
+    repositories: 'getRepositories',
+    addRepository: 'addRepository',
+    removeRepository: 'removeRepository',
+    settings: 'getSettings',
+    setSettings: 'setSettings'
 };
 
 // Titles only: what to do about a failure arrives with it as `remedy`. A code with no entry here renders as a
@@ -44,7 +51,11 @@ const EXPLANATIONS = {
     authorMismatch: 'A different build of this app is already installed.',
     certChainInvalid: 'That package is signed for a device this is not.',
     securityError: 'The TV refused the package before reading it.',
-    privilegeTooHigh: 'That app asks for more than this TV will grant.'
+    privilegeTooHigh: 'That app asks for more than this TV will grant.',
+
+    checksumMismatch: 'The download is not the file that was published.',
+    tooLarge: 'That package is too large to install.',
+    busy: 'Something is already installing.'
 };
 
 const known = remembered();
@@ -65,6 +76,14 @@ const store = createStore({
     catalogStale: false,
 
     checking: null,
+
+    repositories: [],
+    repoBusy: false,
+    settings: null,
+    updateRun: null,
+
+    release: null,
+    releaseLoading: false,
 
     tab: 'catalog',
     github: '',
@@ -145,7 +164,24 @@ const { send } = connect({
 
             state: () => ({ device: payload }),
 
-            catalog: () => ({ catalog: payload.entries || [], catalogStale: !!payload.stale, checking: null }),
+            catalog: () => ({
+                catalog: payload.entries || [],
+                catalogStale: !!payload.stale,
+                checking: null,
+                ...(payload.repositories ? { repositories: payload.repositories } : {})
+            }),
+
+            repositories: () => ({ repositories: payload.repositories || [], repoBusy: false }),
+
+            release: () => ({ release: payload, releaseLoading: false, error: null }),
+
+            settings: () => ({ settings: payload }),
+
+            // Every screen hears a run, whoever started it; the list is asked for again once it ends.
+            updateRun: () => {
+                if (!payload.running) send(Send.catalog, {});
+                return { updateRun: payload };
+            },
 
             dir: () => ({ usb: payload }),
 
@@ -181,11 +217,17 @@ const { send } = connect({
                     };
                 }
 
+                const run = store.get().updateRun;
+
                 return {
                     phase: null,
                     relayBusy: false,
                     uploading: null,
                     checking: null,
+                    repoBusy: false,
+                    releaseLoading: false,
+                    // Set before the service answered; a refusal is the answer, so the banner lets go.
+                    updateRun: run && run.running && !run.total ? null : run,
                     error: {
                         title: EXPLANATIONS[payload.code] || 'Failed.',
                         detail: payload.message || '',
@@ -203,6 +245,7 @@ const { send } = connect({
         if (type === 'hello' && payload.ok) {
             send(Send.catalog, {});
             send(Send.state, {});
+            send(Send.settings, {});
         }
     }
 });
@@ -212,10 +255,10 @@ const value = (id) => {
     return element ? element.value.trim() : '';
 };
 
-const beginInstall = (source, reference) => {
+const beginInstall = (source, reference, asset = null) => {
     // The identity goes with it, or one app's icon sits above another app's progress bar.
     store.update({ error: null, done: null, phase: 'probing', identity: null });
-    send(Send.install, { source, ref: reference });
+    send(Send.install, asset ? { source, ref: reference, asset } : { source, ref: reference });
 };
 
 // Read now rather than after the upload, because the value of it is seeing what this is before spending a
@@ -260,7 +303,58 @@ delegate({
         send(Send.checkUpdates, { id });
     },
 
-    'install:github': () => value('gh') && beginInstall('github', value('gh')),
+    // Listed first, so the file is chosen rather than whichever one the release happens to put first.
+    'install:github': () => {
+        const repo = value('gh');
+        if (!repo) return;
+
+        store.update({ github: repo, release: null, releaseLoading: true, error: null });
+        send(Send.listRelease, { ref: repo });
+    },
+
+    asset: (_element, name) => {
+        const { release } = store.get();
+        if (release && release.repo) beginInstall('github', release.repo, name);
+    },
+
+    'collection:add': () => {
+        const { release } = store.get();
+        if (!release || !release.repo) return;
+
+        store.update({ repoBusy: true, error: null, tab: 'repos' });
+        send(Send.addRepository, { ref: release.repo });
+    },
+
+    'repo:add': () => {
+        const typed = value('repo');
+        if (!typed) return;
+
+        store.update({ repoBusy: true, error: null });
+        send(Send.addRepository, { ref: typed });
+
+        const field = document.getElementById('repo');
+        if (field) field.value = '';
+    },
+
+    // Prefix-routed by delegate(), which splits on the first colon: `unrepo:<id>`.
+    unrepo: (_element, id) => {
+        store.update({ repoBusy: true, error: null });
+        send(Send.removeRepository, { id });
+    },
+
+    auto: (_element, mode) => send(Send.setSettings, { autoUpdate: mode }),
+
+    updateAll: () => {
+        if (store.get().updateRun && store.get().updateRun.running) return;
+        store.update({ error: null, done: null, updateRun: { running: true, index: 0, total: 0, updated: [], failed: [] } });
+        send(Send.updateAll, {});
+    },
+
+    'updateAll:rebuilt': () => {
+        if (store.get().updateRun && store.get().updateRun.running) return;
+        store.update({ error: null, done: null, updateRun: { running: true, index: 0, total: 0, updated: [], failed: [] } });
+        send(Send.updateAll, { includeRebuilt: true });
+    },
     'install:url': () => value('url') && beginInstall('url', value('url')),
 
     file: (element) => chooseFile(element.files[0] || null),
@@ -296,6 +390,7 @@ delegate({
     tab: (_element, name) => {
         store.update({ tab: name });
         if (name === 'usb') send(Send.listDir, { path: store.get().usbPath });
+        if (name === 'repos') send(Send.repositories, {});
     },
 
     // `install:github:owner/repo` — the source and its reference, in the name.

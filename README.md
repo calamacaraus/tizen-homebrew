@@ -149,9 +149,10 @@ https://github.com/user-attachments/assets/c176baef-5690-414c-95a5-7e968464a860
 
 | Tab | |
 | --- | --- |
-| **Apps** | The catalog, installed with one press |
+| **Apps** | The catalog and every added repository, installed with one press; **update all** |
+| **Repos** | Add a collection or a catalog; choose automatic updates |
 | **Upload** | A `.wgt` from the phone |
-| **GitHub** | `owner/repo` — takes the newest release |
+| **GitHub** | `owner/repo` — lists the files in the newest release, with their sha256, to pick one |
 | **URL** | A direct https link |
 | **USB** | A stick plugged into the TV |
 | **Shell** | sdb commands, off by default |
@@ -159,11 +160,21 @@ https://github.com/user-attachments/assets/c176baef-5690-414c-95a5-7e968464a860
 The PIN changes every time the app opens, and the TV screen shows the current
 one. Your phone keeps the last one that worked until the TV restarts.
 
+**Repositories.** Under **repos**, add either a GitHub `owner/repo` whose newest
+release carries the packages — a *collection*, like
+`example/tv-packages`, where every `.wgt` and `.tpk` becomes an
+app — or an https link to a `catalog.json` in the same shape as this one. Their
+apps appear under **apps**, grouped by where they come from.
+
 **Updates.** Every **Apps** row says whether it is installed and at which
 version. Whether anything newer was *released* is a GitHub request per app, so
-it waits to be asked: **check** on a row, or **check all** under the list.
-Tizen Homebrew is in its own catalog, so it updates itself the same way. From a
-working copy, over the LAN:
+it waits to be asked: **check** on a row, or **check all** under the list, which
+also asks each collection what its newest release holds. **update all** installs
+everything with an update, one at a time, Tizen Homebrew itself last. Under
+**repos**, automatic updates can **check daily** (the default: what is newer is
+listed here and on the TV) or **install daily**. The TV's own screen has an
+**apps** button for the same, with the remote. Tizen Homebrew is in its own
+catalog, so it updates itself the same way. From a working copy, over the LAN:
 
 ```sh
 npm run package && npm run push -- <tv-ip> <pin>
@@ -282,6 +293,24 @@ for a two-hundred-app catalog on the way to a screen — so that half is a butto
 three at a time, cached six hours, stopping early if GitHub starts refusing. Only
 strictly newer by semver lights **update**; anything else gets a blocked button
 and a line saying whether it is current or unchecked.
+
+A collection entry has no package id until it is installed, so the pipeline
+remembers which entry installed which package, and the sha256 of the file it
+came from (`installedFrom` in the configuration). A version is read from the file
+name where it has one (`Alpha-1.0.46.wgt`); where it has none (`Bravo.wgt`), a
+file whose sha256 differs from the installed one is the update. A different file
+at the *same* version is a **rebuild**: offered, never installed unasked.
+
+**Checksums.** GitHub publishes a sha256 for every release asset, and a catalog
+entry may state `sha256` itself. A download that does not match is refused before
+anything opens it.
+
+**Reading packages.** `.wgt` files are zips, and many are written with data
+descriptors — sizes after the data rather than in the local header (Alpha,
+Charlie and Bravo all are). `service/src/install/zip.js` reads the central
+directory, walks local headers only when it has just the front of a file, and
+bounds every inflate, since the TV's runtime (Node 12.16) predates
+`maxOutputLength`.
 
 **What a package says it is.** The phone shows the application rather than the
 file it arrived in — name, version, install id and icon, read out of the archive

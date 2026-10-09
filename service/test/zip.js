@@ -90,6 +90,32 @@ const attempt = (fn) => {
 }
 
 {
+    // A manifest that expands to more than any manifest is: refused, not inflated into memory.
+    const bomb = fixture.zipAll([{ name: 'config.xml', contents: Buffer.alloc(zip.MAX_ENTRY + 1, 0x20), deflate: true }]);
+    const read = attempt(() => zip.read(zip.fromBuffer(bomb), 'config.xml'));
+
+    check('an entry that expands past the limit is not inflated',
+        read.value === null || (read.error && /larger|exceeds|RangeError|buffer/i.test(`${read.error.name} ${read.error.message}`)),
+        read.error ? read.error.message : `read ${read.value && read.value.length} bytes`);
+
+    // The real attack: a small entry that declares a small size and inflates to gigabytes.
+    const { deflateRawSync } = require('zlib');
+    const liar = deflateRawSync(Buffer.alloc(64 * 1024 * 1024));
+    const began = Date.now();
+    const bounded = attempt(() => zip.boundedInflate(liar));
+
+    check('an entry that lies about its size is stopped near the cap, not inflated whole',
+        bounded.value === null && Date.now() - began < 5000,
+        bounded.error ? bounded.error.message : `got ${bounded.value && bounded.value.length} bytes in ${Date.now() - began}ms`);
+
+    check('while an ordinary entry still inflates whole',
+        zip.boundedInflate(deflateRawSync(Buffer.from('hello'))).toString() === 'hello', 'wrong bytes');
+
+    check('and the whole archive reports what it would expand to',
+        zip.expandedSize(zip.fromBuffer(bomb)) === zip.MAX_ENTRY + 1, String(zip.expandedSize(zip.fromBuffer(bomb))));
+}
+
+{
     const truncated = fixture.streamedWgt().slice(0, 40);
 
     check('something too short to be a zip is null, not a throw',

@@ -20,7 +20,12 @@ const AT_ONCE = 3;
 
 const quiet = { info: () => {}, ok: () => {}, warn: () => {}, err: () => {}, debug: () => {} };
 
-const askable = (entry) => entry.source.type === 'github';
+// A collection's entries come from one release listing the library already holds, so they are never
+// asked about one at a time.
+const askable = (entry) => entry.source.type === 'github' && !entry.collection;
+
+// Both sides readable as versions, so their order means something.
+const comparable = (left, right) => Boolean(versions.parse(left) && versions.parse(right));
 
 // `packages` and the GitHub lookup are handed in so this can be exercised off a television.
 const createUpdates = ({ packages, log, config, latestRelease = sources.latestRelease }) => {
@@ -107,23 +112,48 @@ const createUpdates = ({ packages, log, config, latestRelease = sources.latestRe
         askTheSet();
     };
 
+    // What this service itself put on the television, by catalog entry: the package id a collection
+    // entry cannot know before its first install, and the sha256 of the file it came from.
+    const learned = () => (config ? config.read().installedFrom || {} : {});
+
     // `checked` separates "not asked yet" from "asked, and there are no releases".
+    //
+    // `update` is a newer version, or — when there is no version to compare, as with a collection file
+    // named Bravo.wgt — a file whose sha256 is not the one installed. `rebuilt` is the quieter case of a
+    // different file at the same version: offered, but not counted as an update.
     const mark = async (entries) => {
         const installed = await installedNow();
+        const memory = learned();
 
         return entries.map((entry) => {
-            const current = entry.packageId ? installed[entry.packageId] || null : null;
+            const memo = memory[entry.id] || null;
+            const packageId = entry.packageId || (memo && memo.packageId) || null;
+            const current = packageId ? installed[packageId] || null : null;
 
             const known = askable(entry) ? fresh(entry.source.ref) : { version: entry.version };
             const available = known ? known.version : null;
 
+            // The very file installed is never its own update — a file named App-1.0.46.wgt whose config.xml
+            // says 1.0.0 would otherwise be reinstalled every day.
+            const same = Boolean(current && memo && memo.sha256 && entry.sha256 && memo.sha256 === entry.sha256 &&
+                (!memo.version || memo.version === current));
+
+            const newer = !same && versions.isNewer(available, current);
+            const differs = Boolean(current && memo && memo.sha256 && entry.sha256 && memo.sha256 !== entry.sha256 &&
+                (!memo.version || memo.version === current));
+            const ordered = comparable(available, current);
+
+            const update = newer || (differs && !ordered);
+
             return {
                 ...entry,
+                packageId,
                 version: available || entry.version,
                 installed: current,
                 available,
                 checked: Boolean(known),
-                update: versions.isNewer(available, current)
+                update,
+                rebuilt: Boolean(differs && ordered && !newer && versions.compare(available, current) === 0)
             };
         });
     };

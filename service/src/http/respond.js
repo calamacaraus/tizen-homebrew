@@ -2,6 +2,14 @@
 
 const MAX_BODY = 200 * 1024 * 1024;
 
+// The phone UI pairs and installs, so it is not to be framed by another page (a click on it could be
+// borrowed), and nothing it serves is to be sniffed into a type it was not sent as.
+const HARDENED = {
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer'
+};
+
 // CORS is open because the phone UI is a separate origin.
 const json = (response, value, status = 200) => {
     const payload = JSON.stringify(value);
@@ -9,7 +17,8 @@ const json = (response, value, status = 200) => {
     response.writeHead(status, {
         'content-type': 'application/json; charset=utf-8',
         'content-length': Buffer.byteLength(payload),
-        'access-control-allow-origin': '*'
+        'access-control-allow-origin': '*',
+        ...HARDENED
     });
     response.end(payload);
 };
@@ -23,7 +32,8 @@ const bytes = (response, buffer, contentType) => {
     response.writeHead(200, {
         'content-type': contentType,
         'content-length': buffer.length,
-        'access-control-allow-origin': '*'
+        'access-control-allow-origin': '*',
+        ...HARDENED
     });
     response.end(buffer);
 };

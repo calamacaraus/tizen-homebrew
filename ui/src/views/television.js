@@ -5,7 +5,7 @@ import { CREDITS } from './credits.js';
 
 // Neither overlay scrolls, so each shows a window of rows. These are first-paint guesses; tv.js measures the
 // real count.
-const ROWS = { logs: 14, credits: 10 };
+const ROWS = { logs: 14, credits: 10, apps: 8 };
 
 // Rows drawn past the fold, so the pane fills to its bottom edge and tv.js always has a row below the last
 // readable one.
@@ -84,9 +84,19 @@ const legend = (keys) => html`
       <span class="legend-key"><span class="key">${key}</span><span>${meaning}</span></span>`)}
   </div>`;
 
+// What the apps screen lists: everything installed from a catalog, with the ones that have an update first.
+const shelf = (state) => (state.apps || [])
+    .filter((app) => app.installed)
+    .sort((a, b) => (Number(Boolean(b.update)) - Number(Boolean(a.update))) || String(a.name).localeCompare(String(b.name)));
+
+const TOTALS = {
+    credits: () => CREDITS.length,
+    apps: (state) => shelf(state).length
+};
+
 const windowOf = (state) => ({
     rows: state.rows || ROWS[state.view] || 0,
-    total: state.view === 'credits' ? CREDITS.length : state.lines.length
+    total: TOTALS[state.view] ? TOTALS[state.view](state) : state.lines.length
 });
 
 // Clamped here too, because the list moves under the window as well as the window over the list.
@@ -172,9 +182,65 @@ const credits = (state) => {
       </div>`;
 };
 
+const AUTO = { off: 'auto · off', check: 'auto · check daily', install: 'auto · install daily' };
+
+const shelfRow = (app) => html`
+  <div class="credit" data-row>
+    <span class="truncate"><span class="name">${app.name}</span></span>
+    <span class="mono small">${app.update
+        ? html`<span class="tone-ok">${app.installed} → ${app.available || 'new build'}</span>`
+        : app.rebuilt ? `${app.installed} · rebuilt` : `${app.installed}`}</span>
+  </div>`;
+
+const progressOf = (run) => {
+    if (!run) return '';
+    if (run.running) return `${run.total ? `${run.index + 1}/${run.total}` : 'looking'}${run.current ? ` · ${run.current}` : '…'}`;
+    if (run.error) return `could not update · ${run.error}`;
+
+    const updated = (run.updated || []).length;
+    const failed = (run.failed || []).length;
+
+    if (!updated && !failed) return (run.available || []).length ? `newer: ${run.available.join(', ')}` : 'everything is up to date';
+
+    return `updated ${updated}${failed ? ` · ${failed} failed` : ''}`;
+};
+
+const apps = (state) => {
+    const listed = shelf(state);
+    const { from, fits, shown } = framed(state, listed, 'start');
+    const pending = listed.filter((app) => app.update).length;
+    const busy = Boolean(state.updateRun && state.updateRun.running);
+
+    const button = (name, label, disabled = false) => html`
+      <button class="btn ${name === 'apps:update' && pending ? 'btn-signal' : 'btn-quiet'}" data-focus="${name}"
+              data-on-click="${name}" ${disabled ? 'disabled' : ''}>${label}</button>`;
+
+    return html`
+      <div class="curtain curtain-dim">
+        <div class="glass dialog">
+          <div class="bar bar-overlay">
+            <span class="label truncate">Apps <span class="small">· ${progressOf(state.updateRun) ||
+                (pending ? `${pending} new` : 'up to date')}</span></span>
+            ${position(from, fits, listed.length, 'apps')}
+            <span class="inline">
+              ${button('apps:check', state.checking ? 'checking…' : 'check now', busy || state.checking)}
+              ${button('apps:update', busy ? 'updating…' : `update all${pending ? ` · ${pending}` : ''}`, busy || !pending)}
+              ${button('apps:auto', AUTO[state.autoUpdate] || 'auto · …')}
+              ${button('close', 'back')}
+            </span>
+          </div>
+          <div class="roll">${listed.length
+              ? shown.map(shelfRow)
+              : html`<div class="credit credit-note" data-row><span class="small">Nothing installed from a catalog yet.</span></div>`}</div>
+          ${legend([['◀ ▶', 'choose'], ['OK', 'select'], ['▲ ▼', 'scroll'], ['↩', 'back']])}
+        </div>
+      </div>`;
+};
+
 const overlay = (state) => {
     if (state.view === 'logs') return console_(state);
     if (state.view === 'credits') return credits(state);
+    if (state.view === 'apps') return apps(state);
 
     return html``;
 };
@@ -189,6 +255,10 @@ const deck = (state) => {
     return html`
       <div class="stack stack-snug">
         <div class="deck">
+          ${button('apps', (() => {
+              const pending = shelf(state).filter((app) => app.update).length;
+              return pending ? `apps · ${pending} updates` : 'apps';
+          })())}
           ${button('restart', state.restarting ? 'restarting…' : 'restart service')}
           ${button('logs', 'show logs')}
           ${button('theme', state.themeOn ? 'theme · on' : 'theme · off')}
