@@ -59,6 +59,7 @@ const EXPLANATIONS = {
     tooLarge: 'That package is too large to install.',
     busy: 'Something is already installing.',
     replacesOther: 'That would replace an app installed from somewhere else.',
+    needsNewerTizen: 'That app is for a newer TV than this one.',
     packageMismatch: 'The download is not the app it was listed as.',
     savedNotApplied: 'Saved. Homebrew cannot fetch this app again by itself — install it once more (its row on the apps tab, or where it came from) and the change shows.'
 };
@@ -102,6 +103,7 @@ const store = createStore({
     // Read when something else repaints the panel (choosing an icon), so what was typed survives.
     customDraft: { name: '' },
     confirming: null,
+    repoChecking: null,
 
     tab: 'catalog',
     github: '',
@@ -192,7 +194,7 @@ const { send } = connect({
                 ...(payload.repositories ? { repositories: payload.repositories } : {})
             }),
 
-            repositories: () => ({ repositories: payload.repositories || [], repoBusy: false }),
+            repositories: () => ({ repositories: payload.repositories || [], repoBusy: false, repoChecking: null }),
 
             release: () => ({ release: payload, releaseLoading: false, error: null }),
 
@@ -270,6 +272,7 @@ const { send } = connect({
                     uploading: null,
                     checking: null,
                     repoBusy: false,
+                    repoChecking: null,
                     releaseLoading: false,
                     customBusy: false,
                     // A refused save keeps its panel, and the picture chosen in it, open to try again.
@@ -475,6 +478,12 @@ delegate({
 
         const field = document.getElementById('repo');
         if (field) field.value = '';
+    },
+
+    // One repository asked again now: `recheck:<id>`.
+    recheck: (_element, id) => {
+        store.update({ repoChecking: id, error: null });
+        send(Send.repositories, { check: id });
     },
 
     // Prefix-routed by delegate(), which splits on the first colon: `unrepo:<id>`.

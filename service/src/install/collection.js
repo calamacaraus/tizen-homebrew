@@ -1,5 +1,7 @@
 'use strict';
 
+const compat = require('./compat.js');
+
 // A collection is a GitHub repository whose newest release carries many packages — One public
 // tizen-community-packages is forty of them in one release. Each package file becomes one catalog
 // entry, so the phone lists them like any other app.
@@ -77,6 +79,7 @@ const expand = (repository, release) => {
                 icon: null,
                 releasedAt: asset.updated_at || release.published_at || null,
                 collection: true,
+                forTizen: compat.fromName(asset.name),
                 repository: repository.id,
                 source: { type: 'github', ref: repository.ref, asset: asset.name, exact: true }
             };

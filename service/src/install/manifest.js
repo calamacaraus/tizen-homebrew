@@ -34,6 +34,7 @@ const identify = (archive) => {
             name: named ? named[1].trim() : null,
             version: attribute(xml, 'widget', 'version'),
             iconPath: attribute(xml, 'icon', 'src'),
+            requires: attribute(xml, 'tizen:application', 'required_version'),
             isWgt: true
         }, 'config.xml');
     }
@@ -54,6 +55,7 @@ const identify = (archive) => {
             name: null,
             version: attribute(xml, 'manifest', 'version'),
             iconPath: icon ? icon[1].trim() : null,
+            requires: attribute(xml, 'manifest', 'api-version'),
             isWgt: false
         }, 'tizen-manifest.xml');
     }

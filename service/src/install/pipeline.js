@@ -4,6 +4,7 @@
 
 
 const sources = require('./sources.js');
+const compat = require('./compat.js');
 const manifest = require('./manifest.js');
 const zip = require('./zip.js');
 const customize = require('./customize.js');
@@ -139,6 +140,15 @@ const createInstaller = ({ sdb, device, config, resigner, store, log, appIcons =
         // tells one source from another; this does.
         const guardIdentity = async (carried) => {
             const { packageId } = carried.identity;
+
+            // Built for a newer Tizen than this TV runs: said plainly now, rather than as whatever the TV's
+            // installer reports after signing and copying it.
+            const tv = carried.state && carried.state.platformVersion;
+            if (tv && carried.identity.requires && compat.compare(carried.identity.requires, tv) === 1) {
+                throw refuse('needsNewerTizen', `${carried.identity.name || packageId} needs Tizen ` +
+                    `${compat.normal(carried.identity.requires)} or newer, and this TV runs Tizen ${compat.normal(tv)}. ` +
+                    'It was not installed; look for a build of it for this TV.');
+            }
             const listed = request.source === 'catalog'
                 ? (store.select('catalog') || []).find((entry) => entry.id === request.reference) : null;
             const repository = listed ? listed.repository || 'official' : null;

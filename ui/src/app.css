@@ -1171,3 +1171,55 @@ fieldset.plain {
 .filter {
   width: 100%;
 }
+
+/* Marks an app that turned up in its repository within the last week. */
+.chip {
+  display: inline-block;
+  padding: 0 0.4em;
+  border-radius: 999px;
+  border: 1px solid rgb(127 227 255 / 55%);
+  color: var(--signal);
+  font-family: var(--mono);
+  font-size: var(--micro);
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+  white-space: nowrap;
+  margin-bottom: 0.2rem;
+}
+
+/* An owner/repo breaks after its slash, not inside a word. */
+.repo-name { word-break: normal; overflow-wrap: break-word; }
+
+.chip-dim { border-color: rgb(167 214 238 / 35%); color: var(--dim); }
+.chip-warn { border-color: rgb(230 196 145 / 60%); color: var(--warn); }
+
+/* A list's heading among its apps: the same row as on the repos tab, set apart from the apps under it. */
+.list-heading {
+  padding-top: 0.25rem;
+  border-bottom: 1px solid rgb(167 214 238 / 18%);
+}
+
+/* The three places of every app row keep one exact width each, so buttons line up from row to row and list
+   to list, whatever their label. */
+.controls .btn-icon,
+.controls .btn-slot { box-sizing: border-box; width: 2.375rem; padding-left: 0; padding-right: 0; }
+.btn-slot { display: inline-block; min-height: 34px; visibility: hidden; }
+.controls .btn-check { box-sizing: border-box; width: 4.75rem; padding-left: 0; padding-right: 0; }
+.controls .btn-main { box-sizing: border-box; width: 6.5rem; padding-left: 0; padding-right: 0; }
+.controls .btn-slot.btn-main { min-height: 34px; }
+
+/* On a phone, an app's name and details take the row's whole width and its three buttons sit on their own
+   line under them, right-aligned and in the same places on every row; side by side once there is room. */
+.row-app {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem;
+
+  & > .controls { justify-self: end; }
+}
+
+@media (--wide) {
+  .row-app {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}

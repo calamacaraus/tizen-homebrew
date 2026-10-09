@@ -2,6 +2,7 @@
 
 import { html } from '../core/view.js';
 import { wordmark } from './television.js';
+import { annotate } from '../core/compat.js';
 
 const masthead = (state) => html`
   <div class="bar">
@@ -114,7 +115,7 @@ const tabs = (state) => html`
 const confirmButton = (state, action, label, asking, extra = 'btn-quiet') => {
     const asked = state.confirming === action;
 
-    return html`<button class="btn ${asked ? 'btn-warn' : extra}" data-focus="${action}"
+    return html`<button class="btn ${asked ? `btn-warn ${extra.indexOf('btn-main') !== -1 ? 'btn-main' : ''}` : extra}" data-focus="${action}"
         data-on-click="${asked ? action : `confirm:${action}`}" aria-live="polite">${asked ? asking : label}</button>`;
 };
 
@@ -125,8 +126,26 @@ const section = (label, body, footer = '') => html`
     ${footer}
   </div>`;
 
+// What this TV can make of an app: the Tizen it is for, and whether it is the build to pick.
+const fitChips = (app) => {
+    const fit = app.fit;
+    if (!fit) return '';
+
+    if (fit.blocked) return html`<span class="chip chip-warn">needs Tizen ${fit.tizen}</span> `;
+    if (fit.best) return html`<span class="chip chip-dim">Tizen ${fit.tizen}</span> <span class="chip">best for this TV</span> `;
+    if (fit.older) return html`<span class="chip chip-dim">Tizen ${fit.tizen}</span> <span class="chip chip-dim">older build</span> `;
+    return html`<span class="chip chip-dim">Tizen ${fit.tizen}</span> `;
+};
+
 const catalogued = (app) => {
-    if (!app.installed) return html`<span class="small truncate">${app.description || app.source.ref}</span>`;
+    if (!app.installed) {
+        if (app.fit && app.fit.blocked) {
+            return html`<span class="small wrap">${fitChips(app)}this TV runs Tizen ${app.fit.tv}</span>`;
+        }
+        const marks = app.isNew || app.fit
+            ? html`<span class="small wrap">${app.isNew ? html`<span class="chip">new</span> ` : ''}${fitChips(app)}</span>` : '';
+        return html`${marks}<span class="small truncate">${app.description || app.source.ref}</span>`;
+    }
 
     const held = html`<span class="mono">${app.installed}</span>`;
 
@@ -155,6 +174,11 @@ const originText = (app, state) => {
     if (!origin) return 'origin unknown · installed before this Homebrew kept records';
     if (origin.replaced) return 'changed outside Homebrew since it was installed from here';
 
+    // Installed from a list that no longer offers it: kept on the TV, with no updates from there.
+    if (app.unlisted && origin.source === 'catalog') {
+        return `${repositoryName(origin.repository, state)} no longer lists it · it stays installed, without updates from there`;
+    }
+
     const what = {
         catalog: () => repositoryName(origin.repository, state) +
             ((origin.repository || 'official') === 'official' && origin.repo ? ` · ${origin.repo}` : ''),
@@ -171,34 +195,41 @@ const originText = (app, state) => {
         .filter(Boolean).join(' · ');
 };
 
-// While one install runs every install button waits: a second tap would only be refused as busy.
+// Every app row has the same three places, in the same order, on every list: ✎, check, and one main button.
+// A place that does nothing for an app keeps its room (or shows its button greyed out), so rows line up and
+// no list looks as if it can do something another cannot.
+
+// The main button: install, update, reinstall a rebuilt file, or "installed" with nothing to do. While one
+// install runs, every one waits.
 const action = (app, busy = false) => {
-    if (app.unlisted) return '';
+    const off = busy || (app.fit && app.fit.blocked) ? 'disabled' : '';
+    const press = (label, kind) => html`<button class="btn ${kind} btn-main" data-focus="app:${app.id}"
+        data-on-click="install:catalog:${app.id}" ${off}>${label}</button>`;
 
-    const off = busy ? 'disabled' : '';
-
-    if (!app.installed) {
-        return html`<button class="btn btn-ghost" data-focus="app:${app.id}"
-                       data-on-click="install:catalog:${app.id}" ${off}>install</button>`;
+    if (app.unlisted || (app.installed && !app.update && !app.rebuilt)) {
+        return html`<button class="btn btn-ghost btn-main" disabled aria-label="Installed and up to date">installed</button>`;
     }
 
-    if (app.rebuilt) {
-        return html`<button class="btn btn-ghost" data-focus="app:${app.id}"
-                       data-on-click="install:catalog:${app.id}" ${off}>reinstall</button>`;
-    }
-
-    // Up to date: nothing to press, and the room goes to the name.
-    if (!app.update) return '';
-
-    return html`<button class="btn btn-signal"
-                   data-focus="app:${app.id}" data-on-click="install:catalog:${app.id}" ${off}>update</button>`;
+    if (!app.installed) return press('install', 'btn-ghost');
+    if (app.update) return press('update', 'btn-signal');
+    return press('reinstall', 'btn-ghost');
 };
 
-// A collection's app is checked by asking its repository again; one listed by URL has nothing to ask.
-// Not when an update is already known: the button would only say so again, and the room goes to the name.
-const recheck = (app, checking) => (app.unlisted || app.update || app.source.type !== 'github' || (app.collection && !app.installed) ? '' : html`
-  <button class="btn btn-quiet" data-focus="check:${app.id}" data-on-click="check:${app.id}"
-          ${checking ? 'disabled' : ''}>${checking === app.id ? 'checking…' : 'check'}</button>`);
+// Check, on every row. An app with a release of its own asks it; one from a collection or a catalog asks its
+// list, which is what answers for it. Only an app no list names has nothing to ask.
+const recheck = (app, checking, repoChecking) => {
+    if (app.unlisted) {
+        return html`<button class="btn btn-quiet btn-check" disabled title="Installed from a file: nothing to ask">check</button>`;
+    }
+
+    const own = app.source && app.source.type === 'github' && !app.collection;
+    const list = app.repository || 'official';
+    const action = own ? `check:${app.id}` : `recheck:${list}`;
+    const busy = own ? checking === app.id : repoChecking === list;
+
+    return html`<button class="btn btn-quiet btn-check" data-focus="check:${app.id}" data-on-click="${action}"
+        ${checking || repoChecking ? 'disabled' : ''}>${busy ? 'checking…' : 'check'}</button>`;
+};
 
 // Your own name and icon, where you set them, are what the row shows: they are what the TV shows.
 const dressed = (app, customizations) => {
@@ -209,10 +240,11 @@ const dressed = (app, customizations) => {
 };
 
 // Not for an app no list names: a change to it could not be installed again without the file.
+// ✎ for an installed app; an empty place of the same size otherwise, so the columns stay put.
 const edit = (app) => (app.installed && app.packageId && !app.unlisted ? html`
   <button class="btn btn-quiet btn-icon" data-focus="customize:${app.packageId}"
           data-on-click="customize:${app.packageId}" title="Your own name and icon"
-          aria-label="Edit name and icon">✎</button>` : '');
+          aria-label="Edit name and icon">✎</button>` : html`<span class="btn-icon btn-slot" aria-hidden="true"></span>`);
 
 const row = (app, checking, customizations, state = null) => {
     const shown = dressed(app, customizations);
@@ -222,11 +254,11 @@ const row = (app, checking, customizations, state = null) => {
     // The origin gets the row's whole width, under the name and buttons, rather than a column one word wide.
     return html`
       <div class="row" data-search="${searchable}">
-        <div class="split">
+        <div class="split row-app">
           ${identity(shown, catalogued(app))}
           <span class="controls">
             ${edit(app)}
-            ${recheck(app, checking)}
+            ${recheck(app, checking, state && state.repoChecking)}
             ${action(app, Boolean(state && state.phase))}
           </span>
         </div>
@@ -351,7 +383,9 @@ const installedRows = (state) => {
         .sort((a, b) => (Number(Boolean(b.update)) - Number(Boolean(a.update))) || String(a.name).localeCompare(String(b.name)));
 };
 
-const catalog = (state) => {
+const catalog = (given) => {
+    // Every app marked for this TV's Tizen before anything is drawn from the list.
+    const state = { ...given, catalog: annotate(given.catalog, given.device && given.device.platformVersion) };
     const pending = state.catalog.filter((app) => app.update).length;
     const rebuilt = state.catalog.filter((app) => app.rebuilt).length;
     const busy = Boolean(state.updateRun && state.updateRun.running);
@@ -388,7 +422,7 @@ const catalog = (state) => {
     const available = groups.length
         ? html`${groups.map((group) => html`
             <div class="stack stack-tight">
-              <span class="micro mono">${group.repository.name} · ${group.apps.length}</span>
+              ${listHeading(state, group.repository, group.apps.length)}
               <div class="list">${group.apps.map((app) => row(app, state.checking, state.customizations, state))}</div>
             </div>`)}`
         : html`<p class="small">Everything listed is installed.</p>`;
@@ -419,23 +453,37 @@ const when = (iso) => {
     return `${Math.round(minutes / 1440)} days ago`;
 };
 
-const repoRow = (state) => (repository) => html`
-  <div class="row split">
+// One look for every list, built in or added, wherever it is shown: what it is, how many apps, what is new,
+// when it was last asked, and a check that asks it again.
+const kindOf = (repository) => (repository.builtIn || repository.id === 'official'
+    ? 'built in' : repository.kind === 'github' ? 'collection' : 'catalog');
+
+const listFacts = (repository, count) => html`${kindOf(repository)} · ${count === null || count === undefined
+    ? 'not loaded yet'
+    : `${count} ${count === 1 ? 'app' : 'apps'}`}${repository.newCount
+    ? html` · <span class="ink">${repository.newCount} new</span>` : ''}${repository.error
+    ? html` · <span class="ink">${repository.stale && count ? 'offline, showing the last list' : repository.error}</span>`
+    : ''}`;
+
+const listCheck = (state, repository) => html`
+  <button class="btn btn-quiet btn-check" data-focus="recheck:${repository.id}" data-on-click="recheck:${repository.id}"
+          ${state.repoChecking || state.checking ? 'disabled' : ''}>${state.repoChecking === repository.id ? 'checking…' : 'check'}</button>`;
+
+const emptySlot = (kind) => html`<span class="${kind} btn-slot" aria-hidden="true"></span>`;
+
+const listHeading = (state, repository, count, extra = '') => (repository.id === 'other' ? html`
+  <span class="micro mono">${repository.name} · ${count}</span>` : html`
+  <div class="row split row-app list-heading">
     <span class="stack stack-tight">
-      <span class="inline">
-        <span class="name truncate">${repository.name}</span>
-        <span class="mono micro">${repository.builtIn ? 'built in' : repository.kind === 'github' ? 'collection' : 'catalog'}</span>
-      </span>
-      <span class="small truncate">${repository.count === null || repository.count === undefined
-          ? 'not loaded yet'
-          : `${repository.count} ${repository.count === 1 ? 'app' : 'apps'}`}${repository.error
-          ? html` · <span class="ink">${repository.stale && repository.count ? 'offline, showing the last list' : repository.error}</span>`
-          : ''}</span>
+      <span class="name wrap repo-name">${String(repository.name).replace(/\//g, '/\u200b')}</span>
+      <span class="small truncate">${listFacts(repository, count)}</span>
+      <span class="micro mono">checked ${when(repository.checkedAt)}</span>
     </span>
-    <span class="controls">
-      ${repository.builtIn ? '' : confirmButton(state, `unrepo:${repository.id}`, 'remove', 'tap again to remove')}
-    </span>
-  </div>`;
+    <span class="controls">${emptySlot('btn-icon')}${listCheck(state, repository)}${extra || emptySlot('btn-main')}</span>
+  </div>`);
+
+const repoRow = (state) => (repository) => listHeading(state, repository, repository.count,
+    repository.builtIn ? '' : confirmButton(state, `unrepo:${repository.id}`, 'remove', 'tap again', 'btn-quiet btn-main'));
 
 const repos = (state) => {
     const mode = state.settings ? state.settings.autoUpdate : null;

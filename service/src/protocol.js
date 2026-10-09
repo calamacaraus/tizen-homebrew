@@ -12,7 +12,7 @@ const Inbound = {
     INSTALL: 'install',             // { source: 'catalog'|'github'|'url'|'file', ref, asset?, confirm? } — asset: an exact release file name; confirm: replace an app installed from elsewhere
     UPDATE_ALL: 'updateAll',        // { includeRebuilt? } — install every app with an update, one after another
     LIST_RELEASE: 'listRelease',    // { ref: 'owner/repo' } — every package file in its newest release
-    GET_REPOSITORIES: 'getRepositories', // -
+    GET_REPOSITORIES: 'getRepositories', // { check? } — check: the id of one repository to ask again now
     ADD_REPOSITORY: 'addRepository',     // { ref: 'owner/repo' | https catalog URL }
     REMOVE_REPOSITORY: 'removeRepository', // { id }
     GET_SETTINGS: 'getSettings',    // -
@@ -84,6 +84,7 @@ const ErrorCode = {
     BUSY: 'busy',
     SAVED_NOT_APPLIED: 'savedNotApplied',
     REPLACES_OTHER: 'replacesOther',
+    NEEDS_NEWER_TIZEN: 'needsNewerTizen',
     PACKAGE_MISMATCH: 'packageMismatch'
 };
 
@@ -154,6 +155,10 @@ function parse(raw) {
 
     if ((msg.type === Inbound.LIST_RELEASE || msg.type === Inbound.ADD_REPOSITORY) && !shortString(payload.ref)) {
         throw ProtocolError(ErrorCode.BAD_MESSAGE, `${msg.type} requires a ref.`);
+    }
+
+    if (msg.type === Inbound.GET_REPOSITORIES && 'check' in payload && payload.check !== null && !shortString(payload.check)) {
+        throw ProtocolError(ErrorCode.BAD_MESSAGE, 'check is the id of one repository.');
     }
 
     if (msg.type === Inbound.REMOVE_REPOSITORY && !shortString(payload.id)) {

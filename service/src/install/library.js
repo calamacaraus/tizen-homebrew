@@ -75,25 +75,63 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
 
     const cachePathOf = (repository) => join(cacheDir, `homebrewRepo-${repository.id}.json`);
 
+    // The cached list, when it was last asked, and when each app was first seen in it — so the phone can say
+    // what is new since. Lists kept by earlier versions (a bare array) are read too.
     const readCache = (repository) => {
         const path = cachePathOf(repository);
         if (!existsSync(path)) return null;
 
         try {
-            return { entries: JSON.parse(readFileSync(path, 'utf8')), age: Date.now() - statSync(path).mtime.getTime() };
+            const kept = JSON.parse(readFileSync(path, 'utf8'));
+            const mtime = statSync(path).mtime.getTime();
+            const entries = Array.isArray(kept) ? kept : kept.entries || [];
+
+            return {
+                entries,
+                seen: (!Array.isArray(kept) && kept.seen) || {},
+                checkedAt: (!Array.isArray(kept) && kept.checkedAt) || mtime,
+                age: Date.now() - mtime
+            };
         } catch (e) {
             return null;
         }
     };
 
-    const writeCache = (repository, entries) => {
+    const writeCache = (repository, entries, seen) => {
         try {
             if (!existsSync(cacheDir)) mkdirSync(cacheDir, { recursive: true });
-            writeFileSync(cachePathOf(repository), JSON.stringify(entries));
+            writeFileSync(cachePathOf(repository), JSON.stringify({ entries, seen, checkedAt: Date.now() }));
         } catch (e) {
             say.warn(`could not cache ${repository.ref}: ${e.message}`);
         }
     };
+
+    // An app in the list since it was added counts as there from the start (0), so adding a collection
+    // does not mark seventy apps new; one that turns up later is new for a week.
+    const NEW_FOR = 7 * 24 * 60 * 60 * 1000;
+
+    const seenFor = (entries, previous) => {
+        // What was seen before is remembered even while a release leaves an app out, so one that comes back
+        // is not new again; kept to the apps listed now plus the most recent few hundred others.
+        const before = previous ? { ...previous.seen } : null;
+        if (previous) previous.entries.forEach((old) => { if (!(old.id in before)) before[old.id] = 0; });
+
+        const seen = {};
+        entries.forEach((entry) => {
+            seen[entry.id] = before ? (entry.id in before ? before[entry.id] : Date.now()) : 0;
+        });
+
+        if (before) {
+            Object.keys(before).filter((id) => !(id in seen)).slice(-500).forEach((id) => { seen[id] = before[id]; });
+        }
+
+        return seen;
+    };
+
+    const marked = (entries, seen) => entries.map((entry) => {
+        const at = seen[entry.id] || 0;
+        return at && Date.now() - at < NEW_FOR ? { ...entry, isNew: true, firstSeen: new Date(at).toISOString() } : entry;
+    });
 
     // A catalog's entries are renamed into the repository's own space, so two catalogs that both list
     // an `app` cannot answer for each other.
@@ -125,7 +163,7 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
             Date.now() - status[repository.id].at < 60 * 1000;
 
         if ((!refresh || recent) && cached && (recent || cached.age < CACHE_TTL)) {
-            return { entries: cached.entries, stale: false };
+            return { entries: marked(cached.entries, cached.seen), stale: false, checkedAt: cached.checkedAt };
         }
 
         const began = Date.now();
@@ -133,18 +171,22 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
         try {
             const entries = repository.kind === 'catalog' ? await fromCatalog(repository) : await fromCollection(repository);
 
-            writeCache(repository, entries);
+            const seen = seenFor(entries, cached);
+            const added = entries.filter((entry) => seen[entry.id] && Date.now() - seen[entry.id] < 1000).length;
+
+            writeCache(repository, entries, seen);
             status[repository.id] = { at: Date.now(), error: null };
 
-            say.ok(`${repository.ref}: ${entries.length} ${entries.length === 1 ? 'app' : 'apps'} in ${took(Date.now() - began)}`);
+            say.ok(`${repository.ref}: ${entries.length} ${entries.length === 1 ? 'app' : 'apps'}` +
+                `${added ? `, ${added} new` : ''} in ${took(Date.now() - began)}`);
 
-            return { entries, stale: false };
+            return { entries: marked(entries, seen), stale: false, checkedAt: Date.now() };
         } catch (error) {
             status[repository.id] = { at: Date.now(), error: error.message };
 
             if (cached) {
                 say.warn(`${repository.ref} unreachable (${error.message}) — showing ${cached.entries.length} cached apps`);
-                return { entries: cached.entries, stale: true, error: error.message };
+                return { entries: marked(cached.entries, cached.seen), stale: true, error: error.message, checkedAt: cached.checkedAt };
             }
 
             say.warn(`${repository.ref}: ${error.message}`);
@@ -160,7 +202,9 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
         count: loaded ? loaded.entries.length : null,
         stale: loaded ? Boolean(loaded.stale) : false,
         error: (loaded && loaded.error) || (status[repository.id] && status[repository.id].error) || null,
-        checkedAt: status[repository.id] ? new Date(status[repository.id].at).toISOString() : null
+        newCount: loaded ? loaded.entries.filter((entry) => entry.isNew).length : 0,
+        checkedAt: loaded && loaded.checkedAt ? new Date(loaded.checkedAt).toISOString()
+            : status[repository.id] ? new Date(status[repository.id].at).toISOString() : null
     });
 
     // `refresh` is everything, or only the collections — a check for updates asks GitHub what their
@@ -196,7 +240,8 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
             source: base.source,
             error: base.error || null,
             repositories: [{ id: OFFICIAL, kind: 'catalog', ref: null, name: 'Tizen Homebrew', count: base.entries.length,
-                stale: Boolean(base.stale), error: base.error || null, builtIn: true }]
+                stale: Boolean(base.stale), error: base.error || null, builtIn: true,
+                checkedAt: base.fetchedAt ? new Date(base.fetchedAt).toISOString() : null }]
                 .concat(loaded.map(({ repository, result }) => describe(repository, result)))
         };
     };
@@ -249,9 +294,10 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
         return gone;
     };
 
-    const list = () => repositories().map((repository) => describe(repository, readCache(repository) && {
-        entries: readCache(repository).entries, stale: false
-    }));
+    const list = () => repositories().map((repository) => {
+        const cached = readCache(repository);
+        return describe(repository, cached && { entries: marked(cached.entries, cached.seen), stale: false, checkedAt: cached.checkedAt });
+    });
 
     return { fetch, add, remove, list, repositories };
 };

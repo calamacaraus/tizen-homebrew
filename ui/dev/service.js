@@ -126,8 +126,11 @@ const COMMUNITY = {
 const COLLECTED = [
     { key: 'alpha', name: 'Alpha', file: 'Alpha-1.0.46.wgt', version: '1.0.46', packageId: 'AlphaApp01', sha: 'a' },
     { key: 'bravo', name: 'Bravo', file: 'Bravo.wgt', version: null, packageId: 'BravoTVapp', sha: 'b', rebuiltFrom: 'f' },
-    { key: 'charlie', name: 'Charlie', file: 'Charlie.wgt', version: null, packageId: null, sha: 'c' },
-    { key: 'echo-tizen', name: 'echo tizen', file: 'echo-tizen-v0.2.0-unsigned.wgt', version: '0.2.0', packageId: null, sha: 'd' }
+    { key: 'charlie', name: 'Charlie', file: 'Charlie.wgt', version: null, packageId: null, sha: 'c', isNew: true },
+    { key: 'echo-tizen', name: 'echo tizen', file: 'echo-tizen-v0.2.0-unsigned.wgt', version: '0.2.0', packageId: null, sha: 'd' },
+    { key: 'overscan-tizen4', name: 'Overscan Tizen4', file: 'Overscan-tizen4.wgt', version: null, packageId: null, sha: 'e', forTizen: '4.0' },
+    { key: 'overscan-tizen6', name: 'Overscan Tizen6', file: 'Overscan-tizen6.wgt', version: null, packageId: null, sha: 'f', forTizen: '6.0' },
+    { key: 'overscan-tizen9', name: 'Overscan Tizen9', file: 'Overscan-tizen9.wgt', version: null, packageId: null, sha: 'a', forTizen: '9.0' }
 ].map((app) => ({
     id: `${COMMUNITY.id}.${app.key}`,
     name: app.name,
@@ -139,6 +142,8 @@ const COLLECTED = [
     repository: COMMUNITY.id,
     icon: null,
     rebuiltFrom: app.rebuiltFrom || null,
+    isNew: Boolean(app.isNew),
+    forTizen: app.forTizen || null,
     source: { type: 'github', ref: COMMUNITY.ref, asset: app.file, exact: true }
 }));
 
@@ -202,8 +207,14 @@ const listed = (checked) => CATALOG.map((app) => {
     };
 }).map(withOrigin));
 
-const repositoryList = () => [{ id: 'official', kind: 'catalog', ref: null, name: 'Tizen Homebrew', count: CATALOG.length, builtIn: true }]
-    .concat(repositories.map((repository) => ({ ...repository, count: repository === COMMUNITY ? COLLECTED.length : 0, error: null })));
+// When each list was last asked, as the real service reports it.
+const checkedAt = { official: Date.now() - 3 * 3600 * 1000 };
+
+const repositoryList = () => [{ id: 'official', kind: 'catalog', ref: null, name: 'Tizen Homebrew', count: CATALOG.length, builtIn: true,
+    checkedAt: new Date(checkedAt.official).toISOString(), newCount: 0 }]
+    .concat(repositories.map((repository) => ({ ...repository, count: repository === COMMUNITY ? COLLECTED.length : 0, error: null,
+        checkedAt: new Date(checkedAt[repository.id] || Date.now() - 2 * 3600 * 1000).toISOString(),
+        newCount: repository === COMMUNITY ? COLLECTED.filter((app) => app.isNew).length : 0 })));
 
 const RELEASES = {
     'example/charlie-tizen': {
@@ -464,7 +475,11 @@ const conversation = (socket, say) => {
 
         getCatalog: () => send('catalog', catalogMessage(checked, { repositories: repositoryList() })),
 
-        getRepositories: () => {
+        getRepositories: async ({ check } = {}) => {
+            if (check) {
+                await new Promise((resolve) => setTimeout(resolve, 700));
+                checkedAt[check] = Date.now();
+            }
             send('repositories', { repositories: repositoryList() });
             send('catalog', catalogMessage(checked, { repositories: repositoryList() }));
         },
