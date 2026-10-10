@@ -34,6 +34,7 @@ const Send = {
 const EXPLANATIONS = {
     unauthorized: 'Enter the PIN shown on the TV first.',
     lockedOut: 'Too many incorrect PINs.',
+    phoneAccessClosed: 'Open Tizen Homebrew on the TV to use it from your phone.',
     debugModeOff: 'Developer Mode is off on this TV.',
     sdbUnreachable: 'This TV cannot reach its own sdb daemon.',
     sdbRefused: 'This TV refused the connection to its own sdb daemon.',
@@ -493,6 +494,7 @@ delegate({
     },
 
     auto: (_element, mode) => send(Send.setSettings, { autoUpdate: mode }),
+    access: (_element, mode) => send(Send.setSettings, { phoneAccess: mode }),
 
     // `customize:<packageId>`, from a row of the apps list.
     customize: (_element, packageId) => {

@@ -37,11 +37,12 @@ const CLOSED_BECAUSE = {
     1005: 'no reason given',
     1006: 'abnormally — the network dropped',
     1011: 'the service faulted',
-    1012: 'the service is restarting'
+    1012: 'the service is restarting',
+    4003: 'because phone access closed'
 };
 
 const attach = ({ server, store, authorise, installer, library, updates, autoUpdate, relay, refreshDevice,
-    fromLoopback, greeting, recorded, config, protocol, log, latestRelease = sources.latestRelease }) => {
+    fromLoopback, access = null, greeting, recorded, config, protocol, log, latestRelease = sources.latestRelease }) => {
     const { Inbound, Outbound, ErrorCode, ProtocolError } = protocol;
 
     const say = log ? log.on('sock') : null;
@@ -91,11 +92,43 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
         verifyClient: (info) => {
             const allowed = allowedOrigin(info);
             if (!allowed && auth) auth.warn(`refused a socket from the web page at ${info.origin}`);
-            return allowed;
+            if (!allowed) return false;
+
+            // A phone while phone access is closed: nothing to try a PIN against until the app is opened on the TV.
+            if (access && !access.allows(info.req)) return false;
+
+            return true;
         }
     });
 
     let connected = 0;
+
+    // The settings as every screen sees them: automatic updates, and when phones may reach this.
+    const settingsNow = () => ({ ...autoUpdate.settings(), ...(access ? access.state() : {}) });
+
+    // When phone access closes, phones still connected are let go — unless an install is under way, which
+    // is finished first and looked at again a minute later.
+    const PHONE_CLOSED = 4003;
+    const letPhonesGo = () => {
+        if (!access || access.isOpen()) return;
+
+        const busy = store.select('installing') || (store.select('updateRun') && store.select('updateRun').running);
+        if (busy) {
+            const later = setTimeout(letPhonesGo, 60000);
+            if (later.unref) later.unref();
+            return;
+        }
+
+        const phones = Array.from(wsServer.clients).filter((client) => !isLoopback(client._socket && client._socket.remoteAddress));
+        if (!phones.length) return;
+
+        if (auth) auth.info(`phone access closed — ${phones.length} ${phones.length === 1 ? 'phone' : 'phones'} let go`);
+        phones.forEach((client) => {
+            try { client.close(PHONE_CLOSED, 'phone access closed'); } catch (e) { client.terminate(); }
+        });
+    };
+
+    if (access) access.onClosed(letPhonesGo);
 
     // Everyone the service pushes to unasked. A phone gets what it asks for; the television's own
     // page asks once and is then told, which is what replaced its second-by-second polling.
@@ -133,8 +166,20 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
         connected += 1;
         if (say) say.info(`${client} connected (${connected} ${connected === 1 ? 'client' : 'clients'})`);
 
+        // A connection from the television itself is its own page: while one is open, phones are let in.
+        const isTvPage = isLoopback(request && request.socket && request.socket.remoteAddress);
+        if (isTvPage && access) {
+            access.pageOpened(socket);
+            broadcastPaired(Outbound.SETTINGS, settingsNow());
+        }
+
         socket.on('close', (code, reason) => {
             connected = Math.max(0, connected - 1);
+
+            if (isTvPage && access) {
+                access.pageClosed(socket);
+                broadcastPaired(Outbound.SETTINGS, settingsNow());
+            }
 
             if (unwatch) unwatch();
 
@@ -302,15 +347,21 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
             await sendRepositories();
         };
 
-        const sendSettings = () => send(Outbound.SETTINGS, autoUpdate.settings());
+        const sendSettings = () => send(Outbound.SETTINGS, settingsNow());
 
-        const setSettings = ({ autoUpdate: mode }) => {
+        const setSettings = ({ autoUpdate: mode, phoneAccess }) => {
             if (mode) {
                 config.update({ autoUpdate: mode });
                 if (say) say.info(`${client} set automatic updates to ${mode}`);
             }
 
-            broadcastPaired(Outbound.SETTINGS, autoUpdate.settings());
+            if (phoneAccess && access) {
+                config.update({ phoneAccess });
+                access.changed();
+                if (say) say.info(`${client} set phone access to ${phoneAccess === 'always' ? 'always' : 'only while the app is open'}`);
+            }
+
+            broadcastPaired(Outbound.SETTINGS, settingsNow());
         };
 
         // Progress reaches every paired screen through autoUpdate's broadcast; this answers with the catalog
