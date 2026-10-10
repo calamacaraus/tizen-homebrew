@@ -345,6 +345,12 @@ bytes are in hand. A `.wgt` chosen for upload is opened on the phone itself
 
 ## Working on it
 
+Nothing needs installing on your computer but Docker: `tools/docker.sh` runs
+any of the commands below in a throwaway Node container, as you, with no extra
+privileges (`tools/docker.sh npm ci`, then `tools/docker.sh npm test`). On Linux,
+`DOCKER_NETWORK=host` lets it reach a TV by its address. `.npmrc` stops
+dependencies running install scripts.
+
 ```sh
 npm run dev          # both screens in a browser, no hardware needed
 npm run dev:service  # the service off-TV, on :8091
