@@ -130,6 +130,23 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
 
     if (access) access.onClosed(letPhonesGo);
 
+    // The built-in list arrived late, after a retry: every paired screen is sent the lists again.
+    const pushCatalog = async () => {
+        const result = await library.fetch({ keepGoing: true });
+        store.update({ catalog: result.entries, catalogStale: result.stale });
+
+        const payload = {
+            entries: await updates.mark(result.entries),
+            others: await updates.others(result.entries),
+            stale: result.stale,
+            source: result.source,
+            repositories: result.repositories || []
+        };
+
+        broadcastPaired(Outbound.CATALOG, payload);
+        broadcastPaired(Outbound.REPOSITORIES, { repositories: payload.repositories });
+    };
+
     // Everyone the service pushes to unasked. A phone gets what it asks for; the television's own
     // page asks once and is then told, which is what replaced its second-by-second polling.
     const watchers = [];
@@ -278,7 +295,7 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
             });
         };
 
-        const listCatalog = async ({ refresh }) => sendCatalog(await library.fetch({ refresh: !!refresh }));
+        const listCatalog = async ({ refresh }) => sendCatalog(await library.fetch({ refresh: !!refresh, keepGoing: true }));
 
         // One app asks GitHub about that app; everything also asks each collection what its newest
         // release holds now, so a rebuilt file in one is seen without a full refresh.
@@ -287,7 +304,7 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
             const asked = id ? (store.select('catalog') || []).find((entry) => entry.id === id) : null;
             const refresh = !id ? 'collections' : asked && asked.collection ? { repository: asked.repository } : null;
 
-            const result = refresh ? await library.fetch({ refresh }) : null;
+            const result = refresh ? await library.fetch({ refresh, keepGoing: true }) : null;
             if (result) store.update({ catalog: result.entries, catalogStale: result.stale });
 
             const entries = store.select('catalog') || [];
@@ -315,7 +332,7 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
 
         // `check`: one repository asked again now — its newest release, or its catalog — rather than all.
         const sendRepositories = async ({ check } = {}) => {
-            const result = await library.fetch(check ? { refresh: { repository: check } } : {});
+            const result = await library.fetch(check ? { refresh: { repository: check }, keepGoing: true } : { keepGoing: true });
             send(Outbound.REPOSITORIES, { repositories: result.repositories });
 
             // A list of apps each with its own release — the built-in one, or a catalog — is checked by asking
@@ -653,7 +670,7 @@ const attach = ({ server, store, authorise, installer, library, updates, autoUpd
         paired_.slice().forEach((to) => to(type, payload));
     }
 
-    return { wsServer, broadcast, broadcastPaired };
+    return { wsServer, broadcast, broadcastPaired, pushCatalog };
 };
 
 module.exports = { attach };

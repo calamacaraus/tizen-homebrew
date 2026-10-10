@@ -170,6 +170,13 @@ const main = async () => {
 
         check('with no repositories, a dead origin is still the failure it was', lonely === 'downloadFailed', String(lonely));
 
+        const told = await library.fetch({ keepGoing: true });
+        const builtIn = told.repositories.find((repository) => repository.builtIn);
+
+        check('but a phone is answered with the empty list and why, so the list\'s own row can say it',
+            told.entries.length === 0 && builtIn && builtIn.count === 0 && /offline/.test(builtIn.error || ''),
+            JSON.stringify(builtIn));
+
         await library.add('example/tv-packages');
         const partial = await library.fetch({});
 

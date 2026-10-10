@@ -209,7 +209,9 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
 
     // `refresh` is everything, or only the collections — a check for updates asks GitHub what their
     // newest releases hold, and leaves plain catalogs to their cache.
-    const fetch = async ({ refresh = false } = {}) => {
+    // `keepGoing`: a dead built-in origin with nothing else added is answered with an empty list that says
+    // why, rather than thrown — what a phone is shown, so the list's own row can say it and offer to retry.
+    const fetch = async ({ refresh = false, keepGoing = false } = {}) => {
         const kept = repositories();
         const everything = refresh === true;
         const one = refresh && typeof refresh === 'object';
@@ -218,7 +220,7 @@ const createLibrary = ({ config, official, cacheDir, log, latestRelease = source
             (result) => result,
             (error) => {
                 // With nothing else to show, a dead origin is still the failure it always was.
-                if (!kept.length) throw error;
+                if (!kept.length && !keepGoing) throw error;
                 return { entries: [], stale: true, source: 'none', error: error.message };
             });
 
