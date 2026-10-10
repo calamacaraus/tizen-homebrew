@@ -679,6 +679,27 @@ const start = () => {
         fromLoopback, access, greeting: () => ({ ...pairing(), build: BUILD }), recorded, config, protocol, log
     });
 
+    // The built-in list, loaded once at start so a phone finds it ready. The service starts with the
+    // television, often before its network is up, and with no copy kept yet a failure used to stay until
+    // somebody pressed refresh: it is tried again by itself, soon at first, then less often, until it loads.
+    const RETRY_AFTER = [30, 60, 120, 300, 900].map((seconds) => seconds * 1000);
+
+    const loadBuiltIn = (attempt) => catalog.fetch().then(
+        (result) => {
+            if (attempt === 0) return;
+            log.on(Facility.CAT).ok(`built-in list loaded on try ${attempt + 1}: ${result.entries.length} apps`);
+            if (sockets) sockets.pushCatalog().catch((error) => log.on(Facility.CAT).warn(`could not send the lists: ${error.message}`));
+        },
+        (error) => {
+            const wait = RETRY_AFTER[Math.min(attempt, RETRY_AFTER.length - 1)];
+            log.on(Facility.CAT).warn(`built-in list not loaded (${error.message}) — trying again in ${took(wait)}`);
+
+            const later = setTimeout(() => loadBuiltIn(attempt + 1), wait);
+            if (later.unref) later.unref();
+        });
+
+    if (device.onTv) loadBuiltIn(0);
+
     process.__homebrewStarted = { server, port: PORT, pin: secret, build: BUILD };
 
     return process.__homebrewStarted;

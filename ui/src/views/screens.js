@@ -401,10 +401,20 @@ const catalog = (given) => {
               ${busy ? 'disabled' : ''}>reinstall rebuilt · ${rebuilt}</button>` : ''}
     </span>`;
 
+    // A list that could not be loaded and has nothing to show still gets its row: what went wrong, and check.
+    const failedLists = (state.repositories || []).filter((repository) => repository.error && !repository.count);
+    const failedRows = failedLists.length
+        ? html`<div class="list">${failedLists.map((repository) => listHeading(state, repository, 0))}</div>` : '';
+
     if (state.catalog.length === 0) {
+        const builtInFailed = failedLists.some((repository) => repository.builtIn);
+
         return html`${customizer(state)}${run(state)}${section('Apps', html`
           ${toolbar}
-          <p class="small">Nothing listed yet. Add a repository under repos, or use upload, github or url.</p>`)}`;
+          ${failedRows}
+          <p class="small">${builtInFailed
+              ? 'The built-in list could not be loaded yet. Homebrew tries again by itself; check or refresh tries now.'
+              : 'Nothing listed yet. Add a repository under repos, or use upload, github or url.'}</p>`)}`;
     }
 
     const installed = installedRows(state);
@@ -427,6 +437,8 @@ const catalog = (given) => {
             </div>`)}`
         : html`<p class="small">Everything listed is installed.</p>`;
 
+    const availableAll = html`${available}${failedRows}`;
+
     // Filtered as you type by the page itself (main.js), so typing never redraws the list or loses the field.
     const filter = html`<input class="field filter" id="filter" type="search" aria-label="Filter apps by name"
         placeholder="filter ${state.catalog.length + (state.others || []).length} apps" data-focus="filter" data-on-input="filter"
@@ -435,7 +447,7 @@ const catalog = (given) => {
     return html`${customizer(state)}${run(state)}
       ${filter}
       ${section(`On this TV · ${installed.length}`, html`${toolbar}${onTv}`)}
-      ${section('Available to install', available)}`;
+      ${section('Available to install', availableAll)}`;
 };
 
 const MODES = [
