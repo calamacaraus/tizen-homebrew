@@ -249,7 +249,22 @@ it comes up with the television and updates apps on its own. Phones, though, are
 let in only while the app is open on the TV, and for 15 minutes after it closes:
 open Tizen Homebrew, then use the phone. A phone that loads the address with the
 app closed is told to open it, and carries on by itself once it is. Under
-**repos → phone access**, **always** lets phones in at any time, as before. Confirmed on a QE65S93DATXXN under a
+**repos → phone access**, **always** lets phones in at any time, as before.
+
+**Stopping when idle.** Automatic updates are **off** until chosen on the phone.
+With them off and phones let in only while the app is open, the service has no
+work while the app is closed, so it stops and gives its memory back: 90 seconds
+after the TV starts if nobody opens the app, or when phone access closes after
+the app does. Opening the app starts it again in a second or two. A TV that
+starts a stopped service straight back is noticed after two such restarts, and
+the service then stays up and waits, as before.
+
+| Setting (configuration file) | Default | Range |
+|---|---|---|
+| `phoneAccess` | `whileOpen` | `whileOpen`, `always` |
+| `phoneAccessMinutes` | 15 | 1–120 |
+| `stopWhenIdle` | `true` | `true`, `false` |
+| `stopAfterBootSeconds` | 90 | 15–3600 | Confirmed on a QE65S93DATXXN under a
 partner certificate; both attributes are documented as partner and platform only,
 whether a public pair gets them is untested, and dropping them returns the
 service to starting when the app opens.

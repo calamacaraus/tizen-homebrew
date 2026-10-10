@@ -30,8 +30,13 @@ const DEFAULTS = {
 
     customizations: {},      // package id -> { name, icon: { type, file } , at } — the image in homebrewIcons/
 
-    autoUpdate: 'check',     // 'off' | 'check' — look daily and say so | 'install' — and install what is newer
+    autoUpdate: 'off',       // 'off' (until chosen on the phone) | 'check' — look daily and say so | 'install' — and install what is newer
     phoneAccess: 'whileOpen', // 'whileOpen' — phones only while the app is open on the TV, and a while after | 'always'
+    phoneAccessMinutes: 15,  // how long after the app closes phones are still let in (1–120)
+    stopWhenIdle: true,      // with updates off and phones only while open: stop the service while the app is closed
+    stopAfterBootSeconds: 90, // started with the TV and the app not opened: how long to wait before stopping (15–3600)
+    idleStop: null,          // { at, loops } — when the service last stopped itself, to notice a TV that restarts it
+    idleStopRestarts: false, // this TV starts the service again at once when it stops, so it stays up instead
     lastUpdateCheck: null,   // ISO time of the last automatic or asked-for check
     lastUpdateResult: null   // { available: [names], updated: [names], failed: [names] }
 };

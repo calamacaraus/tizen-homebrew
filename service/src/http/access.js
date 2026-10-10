@@ -15,9 +15,18 @@
 const { isLoopback } = require('./hosts.js');
 
 const MODES = ['whileOpen', 'always'];
-const GRACE = 15 * 60 * 1000;
 
-const createAccess = ({ config, grace = GRACE, now = () => Date.now(), log = null, timers = { setTimeout, clearTimeout } } = {}) => {
+// Minutes phones stay let in after the app closes: phoneAccessMinutes in the configuration, within these.
+const MINUTES = { fallback: 15, min: 1, max: 120 };
+const GRACE = MINUTES.fallback * 60 * 1000;
+
+const minutesOf = (value) => {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return MINUTES.fallback;
+    return Math.min(MINUTES.max, Math.max(MINUTES.min, Math.round(number)));
+};
+
+const createAccess = ({ config, grace = null, now = () => Date.now(), log = null, timers = { setTimeout, clearTimeout } } = {}) => {
     const say = log ? log.on('auth') : null;
 
     // Open TV pages, by connection; and until when phones are let in after the last one closed.
@@ -26,6 +35,7 @@ const createAccess = ({ config, grace = GRACE, now = () => Date.now(), log = nul
     const closedListeners = [];
 
     const mode = () => (config.read().phoneAccess === 'always' ? 'always' : 'whileOpen');
+    const graceMs = () => (grace === null ? minutesOf(config.read().phoneAccessMinutes) * 60 * 1000 : grace);
 
     const isOpen = () => mode() === 'always' || pages.size > 0 || now() < held.until;
 
@@ -33,6 +43,7 @@ const createAccess = ({ config, grace = GRACE, now = () => Date.now(), log = nul
 
     const state = () => ({
         phoneAccess: mode(),
+        phoneAccessMinutes: Math.round(graceMs() / 60000),
         phonesAllowed: isOpen(),
         // Only meaningful while the window runs down: with a page open, or always, there is no end.
         phonesUntil: mode() === 'whileOpen' && pages.size === 0 && now() < held.until ? new Date(held.until).toISOString() : null
@@ -67,7 +78,7 @@ const createAccess = ({ config, grace = GRACE, now = () => Date.now(), log = nul
 
     // Phones in for the grace period from now: the app was just opened, or its page just closed.
     const extend = () => {
-        held.until = Math.max(held.until, now() + grace);
+        held.until = Math.max(held.until, now() + graceMs());
         arm();
     };
 
@@ -93,7 +104,7 @@ const createAccess = ({ config, grace = GRACE, now = () => Date.now(), log = nul
 
     const onClosed = (listener) => closedListeners.push(listener);
 
-    return { allows, isOpen, state, mode, pageOpened, pageClosed, launched, changed, onClosed, MODES, GRACE: grace };
+    return { allows, isOpen, state, mode, pageOpened, pageClosed, launched, changed, onClosed, MODES };
 };
 
-module.exports = { createAccess, MODES, GRACE };
+module.exports = { createAccess, minutesOf, MODES, MINUTES, GRACE };

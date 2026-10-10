@@ -19,6 +19,7 @@ const { createRouter } = require('./http/router.js');
 const { json, failure, readBody } = require('./http/respond.js');
 const pin = require('./auth/pin.js');
 const { createAccess } = require('./http/access.js');
+const { createIdle } = require('./idle.js');
 const device = require('./tv/device.js');
 const sdb = require('./tv/sdb.js');
 const packages = require('./tv/packages.js');
@@ -699,6 +700,10 @@ const start = () => {
         });
 
     if (device.onTv) loadBuiltIn(0);
+
+    // With nothing to do while the app is closed, the service stops and gives its memory back: see idle.js.
+    const idle = createIdle({ config, access, store, log, onTv: device.onTv });
+    if (device.onTv) idle.start();
 
     process.__homebrewStarted = { server, port: PORT, pin: secret, build: BUILD };
 
