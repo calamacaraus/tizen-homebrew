@@ -16,7 +16,7 @@ const Inbound = {
     ADD_REPOSITORY: 'addRepository',     // { ref: 'owner/repo' | https catalog URL }
     REMOVE_REPOSITORY: 'removeRepository', // { id }
     GET_SETTINGS: 'getSettings',    // -
-    SET_SETTINGS: 'setSettings',    // { autoUpdate?: 'off'|'check'|'install' }
+    SET_SETTINGS: 'setSettings',    // { autoUpdate?: 'off'|'check'|'install', phoneAccess?: 'whileOpen'|'always' }
     GET_CUSTOMIZATIONS: 'getCustomizations', // -
     SET_CUSTOMIZATION: 'setCustomization',   // { packageId, name?, icon?: { type, data }, reset?, apply? }
     LIST_DIR: 'listDir',            // { path }
@@ -33,7 +33,7 @@ const Outbound = {
     CATALOG: 'catalog',             // { entries: [CatalogEntry], others: [installed, no list names it], stale, source, repositories }
     RELEASE: 'release',             // { repo, tag, publishedAt, assets: [{ name, size, sha256 }] }
     REPOSITORIES: 'repositories',   // { repositories: [Repository] }
-    SETTINGS: 'settings',           // { autoUpdate, lastCheck, lastResult }
+    SETTINGS: 'settings',           // { autoUpdate, lastCheck, lastResult, phoneAccess, phonesAllowed, phonesUntil }
     UPDATE_RUN: 'updateRun',        // { running, index, total, current?, updated: [], failed: [], trigger }
     CUSTOMIZATIONS: 'customizations', // { items: { [packageId]: { name, icon (data URI) } } }
     PROGRESS: 'progress',           // { phase, detail?, identity? }
@@ -70,6 +70,7 @@ const ErrorCode = {
     RESIGN_FAILED: 'resignFailed',
     RELAY_DISABLED: 'relayDisabled',
     LOCKED_OUT: 'lockedOut',
+    PHONE_ACCESS_CLOSED: 'phoneAccessClosed',
     INTERNAL: 'internal',
 
     INSTALL_FAILED: 'installFailed',
@@ -98,6 +99,7 @@ function ProtocolError(code, message) {
 const INSTALL_SOURCES = ['catalog', 'github', 'url', 'file'];
 
 const AUTO_UPDATE = ['off', 'check', 'install'];
+const PHONE_ACCESS = ['whileOpen', 'always'];
 
 // Long enough for any real reference, short enough that nothing is stored or logged by the kilobyte.
 const MAX_REF = 512;
@@ -187,6 +189,10 @@ function parse(raw) {
 
     if (msg.type === Inbound.SET_SETTINGS && 'autoUpdate' in payload && AUTO_UPDATE.indexOf(payload.autoUpdate) === -1) {
         throw ProtocolError(ErrorCode.BAD_MESSAGE, `autoUpdate is one of ${AUTO_UPDATE.join(', ')}.`);
+    }
+
+    if (msg.type === Inbound.SET_SETTINGS && 'phoneAccess' in payload && PHONE_ACCESS.indexOf(payload.phoneAccess) === -1) {
+        throw ProtocolError(ErrorCode.BAD_MESSAGE, `phoneAccess is one of ${PHONE_ACCESS.join(', ')}.`);
     }
 
     if (msg.type === Inbound.CHECK_UPDATES && 'id' in payload && payload.id !== null &&

@@ -149,7 +149,8 @@ const COLLECTED = [
 
 const repositories = [COMMUNITY];
 
-const settings = { autoUpdate: 'check', lastCheck: new Date(Date.now() - 3 * 3600 * 1000).toISOString(), lastResult: null };
+const settings = { autoUpdate: 'check', lastCheck: new Date(Date.now() - 3 * 3600 * 1000).toISOString(), lastResult: null,
+    phoneAccess: 'whileOpen', phonesAllowed: true, phonesUntil: new Date(Date.now() + 12 * 60 * 1000).toISOString() };
 
 // Every paired screen, for what all of them hear at once.
 const everyone = new Set();
@@ -545,9 +546,10 @@ const conversation = (socket, say) => {
             await install({ source: 'catalog', ref: entry.id });
         },
 
-        setSettings: ({ autoUpdate }) => {
+        setSettings: ({ autoUpdate, phoneAccess }) => {
             if (autoUpdate) settings.autoUpdate = autoUpdate;
-            log.info('sock', `192.168.2.31 set automatic updates to ${autoUpdate}`);
+            if (phoneAccess) settings.phoneAccess = phoneAccess;
+            log.info('sock', `192.168.2.31 set ${autoUpdate ? `automatic updates to ${autoUpdate}` : `phone access to ${phoneAccess}`}`);
             everyone.forEach((to) => to('settings', settings));
         },
 

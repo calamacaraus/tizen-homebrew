@@ -18,6 +18,7 @@ const { createStore } = require('./state.js');
 const { createRouter } = require('./http/router.js');
 const { json, failure, readBody } = require('./http/respond.js');
 const pin = require('./auth/pin.js');
+const { createAccess } = require('./http/access.js');
 const device = require('./tv/device.js');
 const sdb = require('./tv/sdb.js');
 const packages = require('./tv/packages.js');
@@ -40,6 +41,9 @@ const BUILD = '__HOMEBREW_BUILD__';
 const ORIGIN = '__HOMEBREW_ORIGIN__';
 
 const DEVELOPER = globalThis.__HOMEBREW_DEV__ === true;
+
+// onRequest is exported before start() has made the access gate; it reaches it through this.
+const launchedHook = { run: () => {} };
 
 const start = () => {
     // Tizen can load the service into a process it already runs: a second start would add a second set of
@@ -214,6 +218,10 @@ const start = () => {
     const fromLoopback = (request) => require('./http/hosts.js').trustedLocal(request);
 
     const guard = pin.createGuard();
+
+    // Phones only while the app is open on the TV, and a while after, unless set to always: see access.js.
+    const access = createAccess({ config, log });
+    launchedHook.run = () => access.launched();
 
     // `request` is the HTTP request or the socket's upgrade request: who is asking decides whose failures count.
     const authorise = (presented, request) => {
@@ -573,6 +581,50 @@ const start = () => {
         require('fs').createReadStream(file).on('error', () => response.destroy()).pipe(response);
     });
 
+    // What a phone gets while it is not let in: the page says what to do and looks again by itself, so it
+    // carries on the moment the app is opened on the TV; anything else gets the reason as an error.
+    const CLOSED_PAGE = '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+        '<meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="10">' +
+        '<title>Tizen Homebrew</title></head>' +
+        '<body style="margin:0;padding:12vh 8vw;background:#0d2633;color:#dfeaf0;font:1.1rem/1.5 system-ui,sans-serif">' +
+        '<h1 style="font-size:1.3rem;font-weight:600">Open Tizen Homebrew on the TV</h1>' +
+        '<p>Phones can reach it while the app is open on the TV, and for a while after.</p>' +
+        '<p style="color:#9bb2c0">This page looks again every 10 seconds.</p></body></html>';
+
+    const refusedAt = new Map();
+
+    const closedToPhones = (request, response) => {
+        const address = host(request.socket && request.socket.remoteAddress);
+        const last = refusedAt.get(address) || 0;
+
+        if (Date.now() - last > 60000) {
+            refusedAt.delete(address);
+            refusedAt.set(address, Date.now());
+            Array.from(refusedAt.keys()).slice(0, Math.max(0, refusedAt.size - 64)).forEach((old) => refusedAt.delete(old));
+            log.on(Facility.AUTH).info(`${address} asked while phone access is closed — open the app on the TV to let it in`);
+        }
+
+        request.resume();
+
+        const wantsPage = request.method === 'GET' && /^\/(index\.html)?(\?|$)/.test(request.url || '/');
+
+        if (!wantsPage) {
+            return failure(response, 403, ErrorCode.PHONE_ACCESS_CLOSED, 'Open Tizen Homebrew on the TV to use it from a phone.');
+        }
+
+        response.writeHead(403, {
+            'content-type': 'text/html; charset=utf-8',
+            'content-length': Buffer.byteLength(CLOSED_PAGE),
+            'cache-control': 'no-store',
+            'x-content-type-options': 'nosniff',
+            'x-frame-options': 'DENY',
+            'referrer-policy': 'no-referrer',
+            'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'"
+        });
+
+        return response.end(CLOSED_PAGE);
+    };
+
     const { allowedHost } = require('./http/hosts.js');
 
     const server = createServer((request, response) => {
@@ -582,6 +634,8 @@ const start = () => {
                 'Reach this TV by its IP address. (A development machine reaching it by name can list that name ' +
                 'in HOMEBREW_HOSTNAMES.)');
         }
+
+        if (!access.allows(request)) return closedToPhones(request, response);
 
         return router.listener(request, response);
     });
@@ -622,7 +676,7 @@ const start = () => {
 
     sockets = require('./socket.js').attach({
         server, store, secret, authorise, installer, library, updates, autoUpdate, relay, refreshDevice,
-        fromLoopback, greeting: () => ({ ...pairing(), build: BUILD }), recorded, config, protocol, log
+        fromLoopback, access, greeting: () => ({ ...pairing(), build: BUILD }), recorded, config, protocol, log
     });
 
     process.__homebrewStarted = { server, port: PORT, pin: secret, build: BUILD };
@@ -635,7 +689,12 @@ module.exports.onStart = start;
 module.exports.start = start;
 
 // Tizen calls onRequest for launches into a running service; without it the runner throws on each one.
-module.exports.onRequest = () => log.on(Facility.SVC).debug('a launch reached a service that is already running');
+module.exports.onRequest = () => {
+    log.on(Facility.SVC).debug('a launch reached a service that is already running');
+
+    // The app was opened on the TV: phones are let in now, before its page has even connected.
+    launchedHook.run();
+};
 module.exports.BUILD = BUILD;
 module.exports.PORT = PORT;
 

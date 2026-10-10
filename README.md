@@ -245,15 +245,17 @@ given its own pair during setup: a set holding one re-signs everything it
 installs, in about 150ms.
 
 **Always on.** `config.xml` declares the service `on-boot` and `auto-restart`, so
-it comes up with the television: switch the set on, load the address on a phone,
-install. The app remains for the log, the pairing code and a restart button, and
-closing it leaves the service running. Confirmed on a QE65S93DATXXN under a
+it comes up with the television and updates apps on its own. Phones, though, are
+let in only while the app is open on the TV, and for 15 minutes after it closes:
+open Tizen Homebrew, then use the phone. A phone that loads the address with the
+app closed is told to open it, and carries on by itself once it is. Under
+**repos → phone access**, **always** lets phones in at any time, as before. Confirmed on a QE65S93DATXXN under a
 partner certificate; both attributes are documented as partner and platform only,
 whether a public pair gets them is untested, and dropping them returns the
 service to starting when the app opens.
 
-**Security.** The install endpoint is deliberately open to the network, gated by
-the 6-digit PIN: minted on first run, kept beside the signing keys, readable only
+**Security.** The install endpoint is open to the network while phones are let
+in (see above), gated by the 6-digit PIN: minted on first run, kept beside the signing keys, readable only
 over loopback so a person has to relay it. Keeping it rather than regenerating
 means a reboot neither unpairs every phone nor leaves the code readable only off
 the screen the service exists to avoid. Phones store it per TV and drop it when

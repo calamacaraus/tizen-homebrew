@@ -31,6 +31,7 @@ const DEFAULTS = {
     customizations: {},      // package id -> { name, icon: { type, file } , at } — the image in homebrewIcons/
 
     autoUpdate: 'check',     // 'off' | 'check' — look daily and say so | 'install' — and install what is newer
+    phoneAccess: 'whileOpen', // 'whileOpen' — phones only while the app is open on the TV, and a while after | 'always'
     lastUpdateCheck: null,   // ISO time of the last automatic or asked-for check
     lastUpdateResult: null   // { available: [names], updated: [names], failed: [names] }
 };

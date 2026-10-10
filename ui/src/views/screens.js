@@ -444,6 +444,19 @@ const MODES = [
     ['install', 'install daily', 'Looks once a day and installs what is newer, with nobody at the phone.']
 ];
 
+const ACCESS = [
+    ['whileOpen', 'while open on the TV', 'Phones reach Homebrew while it is open on the TV, and for 15 minutes after. Updates still run on their own.'],
+    ['always', 'always', 'Phones reach Homebrew at any time, even with the TV app closed. Anyone on your network can try the PIN.']
+];
+
+// Clock time today, the date otherwise: when phone access closes.
+const clock = (iso) => {
+    const at = new Date(iso);
+    if (Number.isNaN(at.getTime())) return '';
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+};
+
 const when = (iso) => {
     if (!iso) return 'never';
     const minutes = Math.round((Date.now() - Date.parse(iso)) / 60000);
@@ -488,6 +501,8 @@ const repoRow = (state) => (repository) => listHeading(state, repository, reposi
 const repos = (state) => {
     const mode = state.settings ? state.settings.autoUpdate : null;
     const last = state.settings && state.settings.lastResult;
+    const access = state.settings ? state.settings.phoneAccess || 'whileOpen' : null;
+    const closesAt = state.settings && state.settings.phoneAccess === 'whileOpen' && state.settings.phonesUntil;
 
     return html`
       ${section('Repositories', html`
@@ -514,7 +529,18 @@ const repos = (state) => {
         </fieldset>
         <span class="micro mono">last looked ${when(state.settings && state.settings.lastCheck)}${last && last.updated && last.updated.length
             ? ` · updated ${last.updated.join(', ')}` : ''}${last && last.available && last.available.length
-            ? ` · newer: ${last.available.join(', ')}` : ''}</span>`)}`;
+            ? ` · newer: ${last.available.join(', ')}` : ''}</span>`)}
+      ${section('Phone access', html`
+        <fieldset class="list plain">
+          <legend class="visually-hidden">Phone access</legend>
+          ${ACCESS.map(([value, label, hint]) => html`
+            <label class="toggle">
+              <input type="radio" name="access" data-focus="access:${value}" data-on-change="access:${value}"
+                     ${access === value ? 'checked' : ''}>
+              <span class="stack stack-tight"><span class="small ink">${label}</span><span class="micro">${hint}</span></span>
+            </label>`)}
+        </fieldset>
+        ${closesAt ? html`<span class="micro mono">the TV app is closed · phones until ${clock(closesAt)}</span>` : ''}`)}`;
 };
 
 // The archive is on the phone already, so it is opened and the well shows the app rather than the filename.
