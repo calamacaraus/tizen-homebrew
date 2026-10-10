@@ -150,7 +150,7 @@ const COLLECTED = [
 const repositories = [COMMUNITY];
 
 const settings = { autoUpdate: 'check', lastCheck: new Date(Date.now() - 3 * 3600 * 1000).toISOString(), lastResult: null,
-    phoneAccess: 'whileOpen', phonesAllowed: true, phonesUntil: new Date(Date.now() + 12 * 60 * 1000).toISOString() };
+    phoneAccess: 'whileOpen', phoneAccessMinutes: 15, phonesAllowed: true, phonesUntil: new Date(Date.now() + 12 * 60 * 1000).toISOString() };
 
 // Every paired screen, for what all of them hear at once.
 const everyone = new Set();

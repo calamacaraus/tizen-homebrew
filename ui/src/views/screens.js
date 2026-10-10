@@ -456,8 +456,9 @@ const MODES = [
     ['install', 'install daily', 'Looks once a day and installs what is newer, with nobody at the phone.']
 ];
 
-const ACCESS = [
-    ['whileOpen', 'while open on the TV', 'Phones reach Homebrew while it is open on the TV, and for 15 minutes after. Updates still run on their own.'],
+const ACCESS = (minutes) => [
+    ['whileOpen', 'while open on the TV', `Phones reach Homebrew while it is open on the TV, and for ${minutes} ${minutes === 1
+        ? 'minute' : 'minutes'} after. With automatic updates off, it also stops in the background then, freeing its memory.`],
     ['always', 'always', 'Phones reach Homebrew at any time, even with the TV app closed. Anyone on your network can try the PIN.']
 ];
 
@@ -545,7 +546,7 @@ const repos = (state) => {
       ${section('Phone access', html`
         <fieldset class="list plain">
           <legend class="visually-hidden">Phone access</legend>
-          ${ACCESS.map(([value, label, hint]) => html`
+          ${ACCESS((state.settings && state.settings.phoneAccessMinutes) || 15).map(([value, label, hint]) => html`
             <label class="toggle">
               <input type="radio" name="access" data-focus="access:${value}" data-on-change="access:${value}"
                      ${access === value ? 'checked' : ''}>
